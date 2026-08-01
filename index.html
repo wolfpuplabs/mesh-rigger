@@ -230,7 +230,7 @@
 
       <section class="card locked" id="card-adjust">
         <h2><span class="num">03</span> Adjust joints</h2>
-        <p class="hint">Drag any amber dot in the viewport to move that joint — everything below it in the chain follows, like a real rig. Or pick a joint below and nudge it precisely.</p>
+        <p class="hint">Drag any amber dot in the viewport — it moves on its own, like Mixamo's joint markers, without dragging the rest of the chain with it. Or pick a joint below and nudge it precisely.</p>
         <div class="row">
           <select id="jointSelect" style="flex:1 1 auto;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px;font-family:var(--mono);font-size:12px;"></select>
         </div>
@@ -272,6 +272,11 @@
           <div class="field-lbl"><span>Speed</span><span id="speedVal">1.0×</span></div>
           <input type="range" id="speed" min="0.25" max="2" step="0.05" value="1">
         </div>
+        <div class="row" style="margin-top:14px;border-top:1px solid var(--line);padding-top:12px;">
+          <label class="filebtn small" for="bvhInput">⤒ Import motion (.bvh)</label>
+          <input type="file" id="bvhInput" accept=".bvh">
+        </div>
+        <p class="hint" style="margin-top:6px;margin-bottom:0;">Export any Mixamo animation as <b>BVH</b> (not FBX) and drop it here — it's retargeted onto this rig by matching bone names (Mixamo's <code>mixamorig:</code> names line up with this rig's). Motion follows whatever license it came with — Mixamo's is free for personal/commercial use in your own projects, not for redistributing the raw motion file.</p>
       </section>
 
       <section class="card locked" id="card-export">
@@ -417,6 +422,14 @@ let mixer = null;
 let currentAction = null;
 let allClips = [];               // { name, clip: THREE.AnimationClip }
 let isScrubbing = false;
+
+/* ---- natural rest-pose correction: the rig is estimated in A/T-pose (arms
+   held out), but animations should start from arms hanging naturally at the
+   sides. Computed once per rig from the actual joint geometry, then used as
+   the base orientation every animation builds on top of. --------------- */
+let armCorrection = {};          // { LeftArm: Quaternion, RightArm: Quaternion }
+let restLocalPositions = {};     // { boneName: Vector3 } — local position right after skinning
+let restLocalQuaternions = {};   // { boneName: Quaternion } — corrected rest quaternion (identity, or armCorrection)
 
 /* ---- manual joint-editing state (drag-to-place, Mixamo-style) -------- */
 let previewRigRoot = null;       // temporary Group holding the bone hierarchy during "adjust" phase
@@ -921,6 +934,7 @@ function disposeRig(){
   if(previewRigRoot){ scene.remove(previewRigRoot); previewRigRoot = null; }
   skeleton = null; bonesByName = {}; mixer = null; currentAction = null; allClips = [];
   selectedJointName = null; jointDragActive = false; jointDragBoneName = null;
+  document.querySelectorAll('#animChips .chip[data-anim^="bvh_"]').forEach(function(b){ b.remove(); });
   document.getElementById('card-adjust').classList.add('locked');
   document.getElementById('card-anim').classList.add('locked');
   document.getElementById('card-export').classList.add('locked');
@@ -967,10 +981,29 @@ function selectJoint(boneName){
 function moveJointTo(boneName, worldPoint){
   const bone = bonesByName[boneName];
   if(!bone || !bone.parent) return;
+
+  // Collect every descendant (parent-before-child order) and remember where each
+  // one currently sits in world space, so we can hold them still after the move —
+  // dragging one joint should never drag the rest of the chain along with it.
+  const descendants = [];
+  (function collect(b){
+    b.children.forEach(function(c){ if(c.isBone){ descendants.push(c); collect(c); } });
+  })(bone);
+  const tmp = new THREE.Vector3();
+  const preserved = descendants.map(function(d){ d.getWorldPosition(tmp); return tmp.clone(); });
+
   bone.parent.updateMatrixWorld(true);
-  const local = bone.parent.worldToLocal(worldPoint.clone());
-  bone.position.copy(local);
+  bone.position.copy(bone.parent.worldToLocal(worldPoint.clone()));
   bone.updateMatrixWorld(true);
+
+  // Re-anchor each descendant back to its preserved world position, one at a
+  // time in hierarchy order, so only the dragged joint actually moved.
+  descendants.forEach(function(d, i){
+    d.parent.updateMatrixWorld(true);
+    d.position.copy(d.parent.worldToLocal(preserved[i].clone()));
+    d.updateMatrixWorld(true);
+  });
+
   refreshJointHandles();
 }
 function nudgeSelectedJoint(axis, sign){
@@ -1277,6 +1310,7 @@ async function confirmRig(){
 
     log('Skeleton bound: <b>' + boneList.length + ' bones</b>, ' + currentGeometry.attributes.position.count.toLocaleString() + ' skinned vertices.');
 
+    computeRestPose();
     buildAllClips();
     mixer = new THREE.AnimationMixer(skinnedMesh);
     playAnimation('idle');
@@ -1299,9 +1333,45 @@ window.addEventListener('unhandledrejection', function(e){
 });
 
 /* ---------------------------------------------------------------------
+   5b. REST-POSE CORRECTION
+   The rig's bind pose holds the arms out (A/T-pose). Compute the rotation
+   that would swing each upper-arm chain from wherever it actually ended up
+   down to hanging naturally at the side, using the real joint geometry (so
+   it works whether the rig came from A-pose, T-pose, or manual adjustment).
+   --------------------------------------------------------------------- */
+function computeRestPose(){
+  armCorrection = {};
+  const down = new THREE.Vector3(0, -1, 0);
+  ['Left','Right'].forEach(function(side){
+    const armBone = bonesByName[side+'Arm'];
+    const foreArmBone = bonesByName[side+'ForeArm'];
+    if(armBone && foreArmBone && foreArmBone.position.lengthSq() > 1e-10){
+      const dir = foreArmBone.position.clone().normalize();
+      armCorrection[side+'Arm'] = new THREE.Quaternion().setFromUnitVectors(dir, down);
+    }
+  });
+  restLocalPositions = {};
+  restLocalQuaternions = {};
+  for(const name in bonesByName){
+    restLocalPositions[name] = bonesByName[name].position.clone();
+    restLocalQuaternions[name] = armCorrection[name] ? armCorrection[name].clone() : new THREE.Quaternion();
+  }
+}
+function resetBonesToRest(){
+  for(const name in bonesByName){
+    const b = bonesByName[name];
+    if(restLocalPositions[name]) b.position.copy(restLocalPositions[name]);
+    if(restLocalQuaternions[name]) b.quaternion.copy(restLocalQuaternions[name]);
+  }
+}
+
+/* ---------------------------------------------------------------------
    6. PRESET ANIMATIONS
    Track keyframes are [time, rotX_deg, rotY_deg, rotZ_deg]. "hipsBob" is a
-   list of [time, yDelta] applied as an extra position track on Hips.
+   list of [time, yDelta] applied as an extra position track on Hips. Arm
+   keyframes are deltas from the corrected hanging rest pose (see above),
+   authored on the X axis (forward/back swing or raise) so they compose
+   cleanly with the Z-ish correction rather than fighting it.
    --------------------------------------------------------------------- */
 function q(x,y,z){
   const d = Math.PI/180;
@@ -1323,9 +1393,9 @@ const ANIM_DEFS = {
     Spine:      [[0,0,4,0],[0.25,0,0,0],[0.5,0,-4,0],[0.75,0,0,0],[1.0,0,4,0]],
   }, hipsBob:[[0,0],[0.25,0.02],[0.5,0],[0.75,0.02],[1.0,0]] },
   wave: { name:'Wave', duration:2.2, tracks:{
-    RightShoulder:[[0,0,0,0],[0.3,0,0,-15],[1.9,0,0,-15],[2.2,0,0,0]],
-    RightArm:     [[0,0,0,0],[0.3,0,0,-75],[1.9,0,0,-75],[2.2,0,0,0]],
-    RightForeArm: [[0,0,0,0],[0.4,20,0,0],[0.65,-15,0,0],[0.9,20,0,0],[1.15,-15,0,0],[1.4,20,0,0],[1.65,-15,0,0],[1.9,0,0,0],[2.2,0,0,0]],
+    RightShoulder:[[0,0,0,0],[0.3,-8,0,0],[1.9,-8,0,0],[2.2,0,0,0]],
+    RightArm:     [[0,0,0,0],[0.3,-85,0,0],[1.9,-85,0,0],[2.2,0,0,0]],
+    RightForeArm: [[0,0,0,0],[0.4,25,0,0],[0.65,-10,0,0],[0.9,25,0,0],[1.15,-10,0,0],[1.4,25,0,0],[1.65,-10,0,0],[1.9,0,0,0],[2.2,0,0,0]],
     Head:         [[0,0,0,0],[0.3,0,-10,0],[1.9,0,-10,0],[2.2,0,0,0]],
   }},
   jump: { name:'Jump', duration:1.3, tracks:{
@@ -1333,8 +1403,8 @@ const ANIM_DEFS = {
     RightUpLeg:[[0,0,0,0],[0.15,35,0,0],[0.45,-15,0,0],[0.85,25,0,0],[1.0,0,0,0],[1.3,0,0,0]],
     LeftLeg:   [[0,0,0,0],[0.15,55,0,0],[0.45,5,0,0],[0.85,40,0,0],[1.0,0,0,0],[1.3,0,0,0]],
     RightLeg:  [[0,0,0,0],[0.15,55,0,0],[0.45,5,0,0],[0.85,40,0,0],[1.0,0,0,0],[1.3,0,0,0]],
-    LeftArm:   [[0,0,0,-10],[0.15,0,0,10],[0.45,0,0,-60],[0.85,0,0,10],[1.0,0,0,-10],[1.3,0,0,-10]],
-    RightArm:  [[0,0,0,10],[0.15,0,0,-10],[0.45,0,0,60],[0.85,0,0,-10],[1.0,0,0,10],[1.3,0,0,10]],
+    LeftArm:   [[0,0,0,0],[0.15,-15,0,0],[0.45,-70,0,0],[0.85,-15,0,0],[1.0,0,0,0],[1.3,0,0,0]],
+    RightArm:  [[0,0,0,0],[0.15,-15,0,0],[0.45,-70,0,0],[0.85,-15,0,0],[1.0,0,0,0],[1.3,0,0,0]],
   }, hipsBob:[[0,0],[0.15,-0.05],[0.45,0.18],[0.85,-0.06],[1.0,0.02],[1.3,0]] },
 };
 
@@ -1344,12 +1414,17 @@ function buildClip(def){
     if(!bonesByName[boneName]) continue;
     const kfs = def.tracks[boneName];
     const times = kfs.map(function(k){ return k[0]; });
+    const correction = armCorrection[boneName];
     const values = [];
-    for(const k of kfs){ const quat = q(k[1],k[2],k[3]); values.push(quat.x,quat.y,quat.z,quat.w); }
+    for(const k of kfs){
+      let quat = q(k[1],k[2],k[3]);
+      if(correction) quat = correction.clone().multiply(quat);
+      values.push(quat.x,quat.y,quat.z,quat.w);
+    }
     tracks.push(new THREE.QuaternionKeyframeTrack(boneName + '.quaternion', times, values));
   }
   if(def.hipsBob && bonesByName['Hips']){
-    const base = bonesByName['Hips'].position.clone();
+    const base = (restLocalPositions['Hips'] || bonesByName['Hips'].position).clone();
     const times = def.hipsBob.map(function(k){ return k[0]; });
     const values = [];
     for(const k of def.hipsBob){ values.push(base.x, base.y + k[1], base.z); }
@@ -1370,6 +1445,7 @@ function playAnimation(key){
   const entry = allClips.find(function(c){ return c.key === key; });
   if(!entry) return;
   if(currentAction) currentAction.stop();
+  resetBonesToRest();
   currentAction = mixer.clipAction(entry.clip);
   currentAction.setLoop(THREE.LoopRepeat, Infinity);
   currentAction.paused = false;
@@ -1380,6 +1456,213 @@ function playAnimation(key){
   document.getElementById('scrub').max = String(entry.clip.duration);
   document.getElementById('playBtn').textContent = '⏸ Pause';
   log('Playing <b>' + entry.name + '</b> (' + entry.clip.duration.toFixed(2) + 's loop).');
+}
+
+/* ---------------------------------------------------------------------
+   6b. BVH MOTION IMPORT + RETARGETING (e.g. Mixamo animations exported as .bvh)
+   BVH's Hips/Spine/LeftArm/... naming (stripped of any "mixamorig:" prefix)
+   matches this rig's bone names directly, so retargeting is just: read each
+   frame's Euler angles in the joint's own declared channel order, convert to
+   a quaternion, and build a track — no bone-shape correction needed since
+   every bone here starts at an identity (unrotated) bind pose.
+   --------------------------------------------------------------------- */
+function normalizeBVHJointName(name){
+  return name.replace(/^mixamorig[:_]?/i, '').trim();
+}
+function parseBVH(text){
+  const tokens = text.replace(/\r/g, '').split(/\s+/).filter(function(t){ return t.length > 0; });
+  let idx = 0;
+  function take(){ return tokens[idx++]; }
+  function peek(){ return tokens[idx]; }
+
+  if(take() !== 'HIERARCHY') throw new Error('Not a valid BVH file (missing HIERARCHY keyword).');
+
+  function parseJoint(){
+    const kind = take(); // ROOT / JOINT / End
+    let name;
+    if(kind === 'End'){ take(); name = '__End__'; }
+    else { name = take(); }
+    take(); // '{'
+    const joint = { name: name, offset:[0,0,0], channels:[], children:[], isEnd: kind === 'End' };
+    while(peek() !== '}'){
+      const tok = take();
+      if(tok === 'OFFSET'){
+        joint.offset = [parseFloat(take()), parseFloat(take()), parseFloat(take())];
+      } else if(tok === 'CHANNELS'){
+        const n = parseInt(take(), 10);
+        joint.channels = [];
+        for(let k=0; k<n; k++) joint.channels.push(take());
+      } else if(tok === 'JOINT' || tok === 'End'){
+        idx--;
+        joint.children.push(parseJoint());
+      }
+    }
+    take(); // '}'
+    return joint;
+  }
+
+  const root = parseJoint();
+
+  while(idx < tokens.length && peek() !== 'MOTION') idx++;
+  if(peek() !== 'MOTION') throw new Error('BVH file has no MOTION section.');
+  take(); // 'MOTION'
+  take(); // 'Frames:'
+  const frameCount = parseInt(take(), 10);
+  take(); // 'Frame'
+  take(); // 'Time:'
+  const frameTime = parseFloat(take());
+
+  function countChannels(j){
+    let n = j.channels.length;
+    for(const c of j.children) n += countChannels(c);
+    return n;
+  }
+  const perFrame = countChannels(root);
+
+  const frames = [];
+  for(let f=0; f<frameCount; f++){
+    const vals = new Array(perFrame);
+    for(let k=0; k<perFrame; k++) vals[k] = parseFloat(take());
+    frames.push(vals);
+  }
+  return { root: root, frameCount: frameCount, frameTime: frameTime, frames: frames };
+}
+
+function bvhToClip(bvh, clipName){
+  let offset = 0;
+  (function assign(j){ j._channelStart = offset; offset += j.channels.length; j.children.forEach(assign); })(bvh.root);
+
+  const jointByName = {};
+  (function collect(j){
+    if(!j.isEnd){ const n = normalizeBVHJointName(j.name); if(!jointByName[n]) jointByName[n] = j; }
+    j.children.forEach(collect);
+  })(bvh.root);
+
+  // rough scale estimate: BVH's own hips→head + hips→foot chain length vs this rig's height
+  function findByNorm(list, n){ return list.find(function(c){ return normalizeBVHJointName(c.name) === n; }); }
+  let upper = 0, cur = bvh.root;
+  ['Spine','Spine1','Spine2','Neck','Head'].forEach(function(n){
+    const next = findByNorm(cur.children, n);
+    if(next){ upper += Math.abs(next.offset[1]); cur = next; }
+  });
+  let leg = 0;
+  let legRoot = findByNorm(bvh.root.children, 'LeftUpLeg') || findByNorm(bvh.root.children, 'RightUpLeg');
+  if(legRoot){
+    leg += Math.abs(legRoot.offset[1]);
+    let c2 = legRoot;
+    while(c2.children.length){ c2 = c2.children[0]; leg += Math.abs(c2.offset[1]); if(c2.isEnd) break; }
+  }
+  const bvhHeight = (upper + leg) || 100;
+  const scale = rigHeightRef / bvhHeight;
+
+  // Mixamo/BVH rotation=0 means its own skeleton is in T-pose (arms horizontal).
+  // This rig's rotation=0 means whatever bind pose it actually has (A-pose,
+  // T-pose, or a manual edit). Calibrate LeftArm/RightArm so "BVH identity"
+  // lines up with "this rig's arm pointing horizontal", the same idea as the
+  // hang-down correction above but targeting T-pose instead of hanging.
+  const bvhCalibration = {};
+  ['Left','Right'].forEach(function(side){
+    const armBone = bonesByName[side+'Arm'];
+    const foreArmBone = bonesByName[side+'ForeArm'];
+    if(armBone && foreArmBone && foreArmBone.position.lengthSq() > 1e-10){
+      const dir = foreArmBone.position.clone().normalize();
+      const horizontalOut = new THREE.Vector3(side === 'Left' ? 1 : -1, 0, 0);
+      bvhCalibration[side+'Arm'] = new THREE.Quaternion().setFromUnitVectors(dir, horizontalOut);
+    }
+  });
+
+  const times = [];
+  for(let f=0; f<bvh.frameCount; f++) times.push(f * bvh.frameTime);
+
+  const rotAxis = { Xrotation:'X', Yrotation:'Y', Zrotation:'Z' };
+  const tracks = [];
+  let matched = 0;
+
+  for(const boneName in bonesByName){
+    const bj = jointByName[boneName];
+    if(!bj || !bj.channels.length) continue;
+    const rotChans = bj.channels.filter(function(c){ return /rotation/i.test(c); });
+    if(rotChans.length < 3) continue;
+    const order = rotChans.map(function(c){ return rotAxis[c]; }).join('');
+    const idxOf = {};
+    bj.channels.forEach(function(c, i){ idxOf[c] = bj._channelStart + i; });
+
+    const values = new Array(bvh.frameCount * 4);
+    const e = new THREE.Euler(0,0,0,order);
+    const q = new THREE.Quaternion();
+    const calib = bvhCalibration[boneName];
+    for(let f=0; f<bvh.frameCount; f++){
+      const fr = bvh.frames[f];
+      e.set(
+        THREE.MathUtils.degToRad(fr[idxOf.Xrotation] || 0),
+        THREE.MathUtils.degToRad(fr[idxOf.Yrotation] || 0),
+        THREE.MathUtils.degToRad(fr[idxOf.Zrotation] || 0),
+        order
+      );
+      q.setFromEuler(e);
+      if(calib) q.premultiply(calib);
+      values[f*4]=q.x; values[f*4+1]=q.y; values[f*4+2]=q.z; values[f*4+3]=q.w;
+    }
+    tracks.push(new THREE.QuaternionKeyframeTrack(boneName + '.quaternion', times.slice(), values));
+    matched++;
+
+    if(boneName === 'Hips' && bj.channels.some(function(c){ return /position/i.test(c); })){
+      const base = bonesByName['Hips'].position.clone();
+      const pvals = new Array(bvh.frameCount * 3);
+      for(let f=0; f<bvh.frameCount; f++){
+        const fr = bvh.frames[f];
+        pvals[f*3]   = (fr[idxOf.Xposition] || 0) * scale;
+        pvals[f*3+1] = (fr[idxOf.Yposition] || 0) * scale;
+        pvals[f*3+2] = (fr[idxOf.Zposition] || 0) * scale;
+      }
+      const rx=pvals[0], ry=pvals[1], rz=pvals[2];
+      for(let f=0; f<bvh.frameCount; f++){
+        pvals[f*3]   = base.x + (pvals[f*3]   - rx);
+        pvals[f*3+1] = base.y + (pvals[f*3+1] - ry);
+        pvals[f*3+2] = base.z + (pvals[f*3+2] - rz);
+      }
+      tracks.push(new THREE.VectorKeyframeTrack('Hips.position', times.slice(), pvals));
+    }
+  }
+
+  if(matched === 0){
+    throw new Error('No matching bone names found — this doesn\'t look like a Mixamo-style humanoid BVH.');
+  }
+  const duration = times[times.length-1] || (bvh.frameCount * bvh.frameTime) || 1;
+  const clip = new THREE.AnimationClip(clipName, duration, tracks);
+  clip.userData = { matchedBones: matched };
+  return clip;
+}
+
+function addAnimChip(key, label){
+  const btn = document.createElement('button');
+  btn.className = 'chip small';
+  btn.dataset.anim = key;
+  btn.textContent = label;
+  btn.addEventListener('click', function(){ playAnimation(key); });
+  document.getElementById('animChips').appendChild(btn);
+}
+
+async function handleBVHFile(file){
+  if(!bonesByName || !bonesByName['Hips']){
+    log('⚠️ Rig and confirm the mesh first, then import motion.');
+    return;
+  }
+  log('Parsing "' + file.name + '"…');
+  try{
+    const text = await file.text();
+    const bvh = parseBVH(text);
+    const clipName = file.name.replace(/\.bvh$/i, '').slice(0, 24) || 'Motion';
+    const clip = bvhToClip(bvh, clipName);
+    const key = 'bvh_' + Date.now();
+    allClips.push({ key: key, name: clipName, clip: clip });
+    addAnimChip(key, clipName);
+    playAnimation(key);
+    log('Imported <b>' + clipName + '</b> — ' + bvh.frameCount + ' frames, ' + clip.duration.toFixed(2) + 's, retargeted onto ' + clip.userData.matchedBones + '/23 bones.');
+  } catch(err){
+    console.error(err);
+    log('⚠️ Could not import motion: ' + err.message);
+  }
 }
 
 /* ---------------------------------------------------------------------
@@ -1599,6 +1882,12 @@ document.getElementById('confirmRigBtn').addEventListener('click', function(){ c
 
 document.querySelectorAll('#animChips .chip').forEach(function(btn){
   btn.addEventListener('click', function(){ playAnimation(btn.dataset.anim); });
+});
+
+document.getElementById('bvhInput').addEventListener('change', function(e){
+  const file = e.target.files[0];
+  if(file) handleBVHFile(file);
+  e.target.value = '';
 });
 
 document.getElementById('playBtn').addEventListener('click', function(){
