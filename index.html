@@ -1334,19 +1334,27 @@ window.addEventListener('unhandledrejection', function(e){
 
 /* ---------------------------------------------------------------------
    5b. REST-POSE CORRECTION
-   The rig's bind pose holds the arms out (A/T-pose). Compute the rotation
-   that would swing each upper-arm chain from wherever it actually ended up
-   down to hanging naturally at the side, using the real joint geometry (so
-   it works whether the rig came from A-pose, T-pose, or manual adjustment).
+   The rig's bind pose holds the arms out (A/T-pose). We store two things
+   per arm, computed from the real joint geometry (works for A-pose, T-pose,
+   or a manually-adjusted rig): (1) armCorrection — the rotation that swings
+   it down to hang naturally, used only as the default rest pose when an
+   animation doesn't touch that bone; (2) armBindDir — the arm's original
+   bind-pose direction, used so animations can target an exact absolute
+   direction (e.g. "straight up") via setFromUnitVectors instead of composing
+   Euler deltas on top of a correction, which doesn't reliably combine when
+   the delta and the correction rotate around different axes.
    --------------------------------------------------------------------- */
+let armBindDir = {};
 function computeRestPose(){
   armCorrection = {};
+  armBindDir = {};
   const down = new THREE.Vector3(0, -1, 0);
   ['Left','Right'].forEach(function(side){
     const armBone = bonesByName[side+'Arm'];
     const foreArmBone = bonesByName[side+'ForeArm'];
     if(armBone && foreArmBone && foreArmBone.position.lengthSq() > 1e-10){
       const dir = foreArmBone.position.clone().normalize();
+      armBindDir[side+'Arm'] = dir.clone();
       armCorrection[side+'Arm'] = new THREE.Quaternion().setFromUnitVectors(dir, down);
     }
   });
@@ -1367,11 +1375,15 @@ function resetBonesToRest(){
 
 /* ---------------------------------------------------------------------
    6. PRESET ANIMATIONS
-   Track keyframes are [time, rotX_deg, rotY_deg, rotZ_deg]. "hipsBob" is a
-   list of [time, yDelta] applied as an extra position track on Hips. Arm
-   keyframes are deltas from the corrected hanging rest pose (see above),
-   authored on the X axis (forward/back swing or raise) so they compose
-   cleanly with the Z-ish correction rather than fighting it.
+   Track keyframes are [time, rotX_deg, rotY_deg, rotZ_deg] for ordinary
+   bones (legs, spine, head) — plain Euler deltas, no correction involved.
+   "dirTracks" keyframes are [time, dx, dy, dz]: an absolute direction (not
+   yet normalized) that LeftArm/RightArm should point toward at that time,
+   e.g. (0,-1,0) = hanging straight down, (0,1,0) = straight up. Each is
+   converted to an exact quaternion via setFromUnitVectors from the arm's
+   real bind-pose direction — this is what actually makes "raise the arm"
+   reliably mean "raise the arm" regardless of the rig's original pose.
+   "hipsBob" is a list of [time, yDelta] applied as an extra position track.
    --------------------------------------------------------------------- */
 function q(x,y,z){
   const d = Math.PI/180;
@@ -1382,29 +1394,36 @@ const ANIM_DEFS = {
     Spine1: [[0,0,0,0],[1.2,1.5,0,0],[2.4,0,0,0]],
     Head:   [[0,0,0,0],[1.2,0,4,0],[2.4,0,0,0]],
     Hips:   [[0,0,0,0],[1.2,0,0,1.5],[2.4,0,0,0]],
+  }, dirTracks:{
+    LeftArm:  [[0,0,-1,-0.05],[1.2,0.05,-0.998,-0.06],[2.4,0,-1,-0.05]],
+    RightArm: [[0,0,-1,-0.05],[1.2,-0.05,-0.998,-0.06],[2.4,0,-1,-0.05]],
   }},
   walk: { name:'Walk', duration:1.0, tracks:{
-    LeftUpLeg:  [[0,25,0,0],[0.25,0,0,0],[0.5,-25,0,0],[0.75,0,0,0],[1.0,25,0,0]],
-    RightUpLeg: [[0,-25,0,0],[0.25,0,0,0],[0.5,25,0,0],[0.75,0,0,0],[1.0,-25,0,0]],
-    LeftLeg:    [[0,8,0,0],[0.25,45,0,0],[0.5,5,0,0],[0.75,10,0,0],[1.0,8,0,0]],
-    RightLeg:   [[0,5,0,0],[0.25,10,0,0],[0.5,8,0,0],[0.75,45,0,0],[1.0,5,0,0]],
-    LeftArm:    [[0,-22,0,0],[0.25,0,0,0],[0.5,22,0,0],[0.75,0,0,0],[1.0,-22,0,0]],
-    RightArm:   [[0,22,0,0],[0.25,0,0,0],[0.5,-22,0,0],[0.75,0,0,0],[1.0,22,0,0]],
-    Spine:      [[0,0,4,0],[0.25,0,0,0],[0.5,0,-4,0],[0.75,0,0,0],[1.0,0,4,0]],
-  }, hipsBob:[[0,0],[0.25,0.02],[0.5,0],[0.75,0.02],[1.0,0]] },
+    LeftUpLeg:  [[0,14,0,0],[0.25,0,0,0],[0.5,-14,0,0],[0.75,0,0,0],[1.0,14,0,0]],
+    RightUpLeg: [[0,-14,0,0],[0.25,0,0,0],[0.5,14,0,0],[0.75,0,0,0],[1.0,-14,0,0]],
+    LeftLeg:    [[0,6,0,0],[0.25,32,0,0],[0.5,4,0,0],[0.75,7,0,0],[1.0,6,0,0]],
+    RightLeg:   [[0,4,0,0],[0.25,7,0,0],[0.5,6,0,0],[0.75,32,0,0],[1.0,4,0,0]],
+    Spine:      [[0,0,3,0],[0.25,0,0,0],[0.5,0,-3,0],[0.75,0,0,0],[1.0,0,3,0]],
+  }, dirTracks:{
+    LeftArm:  [[0,0.08,-0.85,-0.5],[0.25,0,-0.97,-0.08],[0.5,0.08,-0.85,0.5],[0.75,0,-0.97,-0.08],[1.0,0.08,-0.85,-0.5]],
+    RightArm: [[0,-0.08,-0.85,0.5],[0.25,0,-0.97,-0.08],[0.5,-0.08,-0.85,-0.5],[0.75,0,-0.97,-0.08],[1.0,-0.08,-0.85,0.5]],
+  }, hipsBob:[[0,0],[0.25,0.015],[0.5,0],[0.75,0.015],[1.0,0]] },
   wave: { name:'Wave', duration:2.2, tracks:{
     RightShoulder:[[0,0,0,0],[0.3,-8,0,0],[1.9,-8,0,0],[2.2,0,0,0]],
-    RightArm:     [[0,0,0,0],[0.3,-85,0,0],[1.9,-85,0,0],[2.2,0,0,0]],
     RightForeArm: [[0,0,0,0],[0.4,25,0,0],[0.65,-10,0,0],[0.9,25,0,0],[1.15,-10,0,0],[1.4,25,0,0],[1.65,-10,0,0],[1.9,0,0,0],[2.2,0,0,0]],
     Head:         [[0,0,0,0],[0.3,0,-10,0],[1.9,0,-10,0],[2.2,0,0,0]],
+  }, dirTracks:{
+    RightArm: [[0,0,-1,-0.05],[0.3,0.15,0.85,0.4],[1.9,0.15,0.85,0.4],[2.2,0,-1,-0.05]],
+    LeftArm:  [[0,0,-1,-0.05],[2.2,0,-1,-0.05]],
   }},
   jump: { name:'Jump', duration:1.3, tracks:{
     LeftUpLeg: [[0,0,0,0],[0.15,35,0,0],[0.45,-15,0,0],[0.85,25,0,0],[1.0,0,0,0],[1.3,0,0,0]],
     RightUpLeg:[[0,0,0,0],[0.15,35,0,0],[0.45,-15,0,0],[0.85,25,0,0],[1.0,0,0,0],[1.3,0,0,0]],
     LeftLeg:   [[0,0,0,0],[0.15,55,0,0],[0.45,5,0,0],[0.85,40,0,0],[1.0,0,0,0],[1.3,0,0,0]],
     RightLeg:  [[0,0,0,0],[0.15,55,0,0],[0.45,5,0,0],[0.85,40,0,0],[1.0,0,0,0],[1.3,0,0,0]],
-    LeftArm:   [[0,0,0,0],[0.15,-15,0,0],[0.45,-70,0,0],[0.85,-15,0,0],[1.0,0,0,0],[1.3,0,0,0]],
-    RightArm:  [[0,0,0,0],[0.15,-15,0,0],[0.45,-70,0,0],[0.85,-15,0,0],[1.0,0,0,0],[1.3,0,0,0]],
+  }, dirTracks:{
+    LeftArm:  [[0,0,-1,-0.05],[0.15,0.06,-0.9,-0.35],[0.45,0.12,0.85,0.3],[0.85,0.06,-0.9,-0.15],[1.0,0,-1,-0.05],[1.3,0,-1,-0.05]],
+    RightArm: [[0,0,-1,-0.05],[0.15,-0.06,-0.9,-0.35],[0.45,-0.12,0.85,0.3],[0.85,-0.06,-0.9,-0.15],[1.0,0,-1,-0.05],[1.3,0,-1,-0.05]],
   }, hipsBob:[[0,0],[0.15,-0.05],[0.45,0.18],[0.85,-0.06],[1.0,0.02],[1.3,0]] },
 };
 
@@ -1420,6 +1439,20 @@ function buildClip(def){
       let quat = q(k[1],k[2],k[3]);
       if(correction) quat = correction.clone().multiply(quat);
       values.push(quat.x,quat.y,quat.z,quat.w);
+    }
+    tracks.push(new THREE.QuaternionKeyframeTrack(boneName + '.quaternion', times, values));
+  }
+  for(const boneName in (def.dirTracks || {})){
+    const bindDir = armBindDir[boneName];
+    if(!bonesByName[boneName] || !bindDir) continue;
+    const kfs = def.dirTracks[boneName];
+    const times = kfs.map(function(k){ return k[0]; });
+    const values = [];
+    const target = new THREE.Vector3();
+    for(const k of kfs){
+      target.set(k[1], k[2], k[3]).normalize();
+      const quat = new THREE.Quaternion().setFromUnitVectors(bindDir, target);
+      values.push(quat.x, quat.y, quat.z, quat.w);
     }
     tracks.push(new THREE.QuaternionKeyframeTrack(boneName + '.quaternion', times, values));
   }
