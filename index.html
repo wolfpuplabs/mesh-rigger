@@ -1,0 +1,1296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Mesh → Motion — Auto-Rig Studio</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<style>
+  :root{
+    --bg:#0b0d10;
+    --panel:#12151a;
+    --panel2:#171b21;
+    --line:#242a31;
+    --text:#e7e9ec;
+    --muted:#8b93a0;
+    --accent:#4de5c0;
+    --accent-dim:#2f8f7c;
+    --accent2:#ffb454;
+    --danger:#ff6b6b;
+    --radius:10px;
+    --mono: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+    --disp: 'Space Grotesk', Inter, system-ui, sans-serif;
+    --body: 'Inter', system-ui, -apple-system, sans-serif;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;height:100%;background:var(--bg);color:var(--text);font-family:var(--body);-webkit-tap-highlight-color:transparent;overscroll-behavior:none;}
+  body{display:flex;flex-direction:column;}
+  #app{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;}
+
+  /* ---------- header / stepper ---------- */
+  header{
+    padding:12px 14px 10px;
+    border-bottom:1px solid var(--line);
+    background:linear-gradient(180deg,#0d1013,#0b0d10);
+    flex:0 0 auto;
+  }
+  .brand{display:flex;align-items:baseline;gap:8px;margin-bottom:10px;}
+  .brand h1{
+    font-family:var(--disp);font-weight:700;font-size:16px;letter-spacing:.02em;margin:0;color:var(--text);
+  }
+  .brand h1 span{color:var(--accent);}
+  .brand small{color:var(--muted);font-family:var(--mono);font-size:11px;}
+
+  .stepper{display:flex;align-items:center;width:100%;}
+  .step{display:flex;align-items:center;flex:1 1 auto;position:relative;}
+  .step .dot{
+    width:22px;height:22px;border-radius:50%;flex:0 0 auto;
+    border:1px solid var(--line);background:var(--panel2);
+    display:flex;align-items:center;justify-content:center;
+    font-family:var(--mono);font-size:11px;color:var(--muted);
+    transition:all .25s ease;
+  }
+  .step .lbl{margin-left:6px;font-size:11px;color:var(--muted);font-family:var(--body);white-space:nowrap;transition:color .25s ease;}
+  .step .bar{flex:1 1 auto;height:1px;background:var(--line);margin:0 8px;transition:background .3s ease;}
+  .step:last-child .bar{display:none;}
+  .step.active .dot{border-color:var(--accent);color:var(--accent);box-shadow:0 0 0 3px rgba(77,229,192,.12);}
+  .step.active .lbl{color:var(--text);}
+  .step.done .dot{background:var(--accent-dim);border-color:var(--accent);color:#04241d;}
+  .step.done .bar{background:var(--accent-dim);}
+
+  /* ---------- layout ---------- */
+  #main{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;}
+  #viewport-wrap{flex:1 1 auto;min-height:220px;position:relative;background:radial-gradient(ellipse at 50% 30%, #10141a 0%, #0a0c0f 70%);}
+  #gl{display:block;width:100%;height:100%;}
+  #viewport-hint{
+    position:absolute;left:10px;bottom:10px;font-family:var(--mono);font-size:10.5px;color:var(--muted);
+    background:rgba(10,12,15,.55);border:1px solid var(--line);padding:4px 8px;border-radius:6px;
+    pointer-events:none;
+  }
+  #stats-badge{
+    position:absolute;right:10px;top:10px;font-family:var(--mono);font-size:10.5px;color:var(--accent);
+    background:rgba(10,12,15,.6);border:1px solid var(--line);padding:5px 9px;border-radius:6px;
+    text-align:right;line-height:1.5;
+  }
+  #stats-badge b{color:var(--text);font-weight:500;}
+  #dropzone-overlay{
+    position:absolute;inset:0;display:none;align-items:center;justify-content:center;
+    background:rgba(11,13,16,.85);border:2px dashed var(--accent);
+    font-family:var(--disp);font-size:14px;color:var(--accent);z-index:5;
+  }
+  #dropzone-overlay.show{display:flex;}
+
+  #panel{
+    flex:0 0 auto;max-height:50vh;overflow-y:auto;
+    background:var(--panel);border-top:1px solid var(--line);
+    padding:14px 14px 90px;
+  }
+
+  section.card{
+    background:var(--panel2);border:1px solid var(--line);border-radius:var(--radius);
+    padding:12px 13px;margin-bottom:10px;transition:opacity .25s ease, filter .25s ease;
+  }
+  section.card.locked{opacity:.42;filter:grayscale(.5);pointer-events:none;}
+  .card h2{
+    font-family:var(--mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--accent);
+    margin:0 0 4px;display:flex;align-items:center;gap:6px;
+  }
+  .card h2 .num{color:var(--muted);}
+  .card p.hint{margin:2px 0 10px;color:var(--muted);font-size:12px;line-height:1.5;}
+
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;}
+  .row + .row{margin-top:8px;}
+
+  button{
+    font-family:var(--body);font-size:13px;font-weight:600;color:var(--text);
+    background:var(--panel);border:1px solid var(--line);border-radius:8px;
+    padding:9px 14px;cursor:pointer;transition:all .15s ease;
+  }
+  button:active{transform:scale(.97);}
+  button.primary{background:var(--accent);color:#05231d;border-color:var(--accent);}
+  button.primary:hover{background:#5cf0cc;}
+  button.ghost{background:transparent;}
+  button:disabled{opacity:.4;cursor:default;pointer-events:none;}
+  button.small{padding:6px 10px;font-size:12px;}
+  button.chip{border-radius:20px;}
+  button.chip.on{background:var(--accent2);border-color:var(--accent2);color:#2b1a02;}
+
+  input[type=file]{display:none;}
+  label.filebtn{
+    font-family:var(--body);font-size:13px;font-weight:600;color:#05231d;
+    background:var(--accent);border-radius:8px;padding:9px 14px;cursor:pointer;
+    display:inline-flex;align-items:center;gap:6px;
+  }
+
+  input[type=range]{
+    -webkit-appearance:none;appearance:none;width:100%;height:26px;background:transparent;margin:2px 0;
+  }
+  input[type=range]::-webkit-slider-runnable-track{height:4px;background:var(--line);border-radius:2px;}
+  input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none;width:16px;height:16px;border-radius:50%;background:var(--accent);
+    margin-top:-6px;border:2px solid #05231d;
+  }
+  input[type=range]::-moz-range-track{height:4px;background:var(--line);border-radius:2px;}
+  input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;background:var(--accent);border:2px solid #05231d;}
+
+  .field-lbl{font-size:11px;color:var(--muted);font-family:var(--mono);display:flex;justify-content:space-between;margin-bottom:2px;}
+  .checkline{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--muted);margin-top:8px;}
+  .checkline input{accent-color:var(--accent);}
+
+  .stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:8px;}
+  .stat-grid div{background:var(--panel);border:1px solid var(--line);border-radius:7px;padding:6px 8px;}
+  .stat-grid .k{font-family:var(--mono);font-size:9.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;}
+  .stat-grid .v{font-family:var(--mono);font-size:13px;color:var(--text);}
+
+  #log{
+    background:#08090b;border:1px solid var(--line);border-radius:8px;
+    padding:8px 10px;height:110px;overflow-y:auto;font-family:var(--mono);font-size:11px;line-height:1.6;color:#9fb0a8;
+  }
+  #log .t{color:#4a5560;margin-right:6px;}
+  #log .logline{white-space:pre-wrap;word-break:break-word;}
+
+  ::-webkit-scrollbar{width:8px;height:8px;}
+  ::-webkit-scrollbar-thumb{background:var(--line);border-radius:4px;}
+  ::-webkit-scrollbar-track{background:transparent;}
+
+  @media (min-width:880px){
+    #main{flex-direction:row;}
+    #viewport-wrap{flex:1 1 auto;height:100%;}
+    #panel{flex:0 0 400px;max-height:none;height:100%;padding-bottom:20px;}
+  }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <header>
+    <div class="brand">
+      <h1>MESH <span>→</span> MOTION</h1>
+      <small>auto-rig studio</small>
+    </div>
+    <div class="stepper" id="stepper">
+      <div class="step active" data-step="1"><div class="dot">1</div><div class="lbl">Upload</div><div class="bar"></div></div>
+      <div class="step" data-step="2"><div class="dot">2</div><div class="lbl">Rig</div><div class="bar"></div></div>
+      <div class="step" data-step="3"><div class="dot">3</div><div class="lbl">Animate</div><div class="bar"></div></div>
+      <div class="step" data-step="4"><div class="dot">4</div><div class="lbl">Export</div><div class="bar"></div></div>
+    </div>
+  </header>
+
+  <div id="main">
+    <div id="viewport-wrap">
+      <canvas id="gl"></canvas>
+      <div id="stats-badge">
+        <div>verts <b id="statVerts">–</b></div>
+        <div>tris <b id="statTris">–</b></div>
+        <div>bones <b id="statBones">–</b></div>
+      </div>
+      <div id="viewport-hint">drag to orbit · scroll / pinch to zoom</div>
+      <div id="dropzone-overlay">Drop .obj / .stl to load</div>
+    </div>
+
+    <div id="panel">
+
+      <section class="card" id="card-upload">
+        <h2><span class="num">01</span> Upload mesh</h2>
+        <p class="hint">Best results with a humanoid character in <b>A-pose</b> (arms angled down &amp; out), standing upright, roughly centered. Formats: .obj, .stl, .glb, .gltf (embedded buffers only — no separate .bin/textures).</p>
+        <div class="row">
+          <label class="filebtn" for="fileInput">⤒ Choose file</label>
+          <input type="file" id="fileInput" accept=".obj,.stl,.glb,.gltf">
+          <button class="ghost small" id="sampleBtn">Use sample figure</button>
+        </div>
+        <div class="stat-grid" id="uploadStats" style="display:none;">
+          <div><div class="k">Source</div><div class="v" id="statSource">–</div></div>
+          <div><div class="k">Height (units)</div><div class="v" id="statHeight">–</div></div>
+        </div>
+      </section>
+
+      <section class="card locked" id="card-rig">
+        <h2><span class="num">02</span> Auto-rig</h2>
+        <p class="hint">Generates a 23-bone humanoid skeleton fitted to the mesh's bounding box, then computes skin weights by proximity to each bone.</p>
+        <div class="row">
+          <button class="primary" id="rigBtn">Auto-Rig mesh</button>
+          <label class="checkline"><input type="checkbox" id="skeletonToggle" checked> show skeleton</label>
+        </div>
+      </section>
+
+      <section class="card locked" id="card-anim">
+        <h2><span class="num">03</span> Animate</h2>
+        <div class="row" id="animChips">
+          <button class="chip small on" data-anim="idle">Idle</button>
+          <button class="chip small" data-anim="walk">Walk</button>
+          <button class="chip small" data-anim="wave">Wave</button>
+          <button class="chip small" data-anim="jump">Jump</button>
+        </div>
+        <div class="row" style="margin-top:10px;">
+          <button class="small" id="playBtn">⏸ Pause</button>
+        </div>
+        <div style="margin-top:10px;">
+          <div class="field-lbl"><span>Scrub</span><span id="scrubTime">0.00s</span></div>
+          <input type="range" id="scrub" min="0" max="1" step="0.001" value="0">
+        </div>
+        <div>
+          <div class="field-lbl"><span>Speed</span><span id="speedVal">1.0×</span></div>
+          <input type="range" id="speed" min="0.25" max="2" step="0.05" value="1">
+        </div>
+      </section>
+
+      <section class="card locked" id="card-export">
+        <h2><span class="num">04</span> Export</h2>
+        <p class="hint">Downloads a single self-contained <b>.gltf</b> file: rigged mesh + skeleton + all four baked animation clips. Opens in Blender, Unity, most glTF viewers.</p>
+        <button class="primary" id="downloadBtn" style="width:100%;">⬇ Download rigged model (.gltf)</button>
+      </section>
+
+      <section class="card">
+        <h2>Log</h2>
+        <div id="log"></div>
+      </section>
+
+    </div>
+  </div>
+</div>
+
+<script>
+/* =========================================================================
+   MESH → MOTION — Auto-Rig Studio
+   Single-file three.js app: upload a humanoid mesh (OBJ/STL), auto-generate
+   a heuristic humanoid skeleton fitted to its bounding box, compute skin
+   weights by proximity, play preset animation clips, export a self-
+   contained rigged + animated .gltf.
+   ========================================================================= */
+
+/* ---------------------------------------------------------------------
+   0. LOG / DOM HELPERS
+   --------------------------------------------------------------------- */
+function log(msg){
+  const el = document.getElementById('log');
+  if(!el) return;
+  const line = document.createElement('div');
+  line.className = 'logline';
+  const t = new Date().toLocaleTimeString();
+  line.innerHTML = '<span class="t">' + t + '</span>' + msg;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+}
+window.addEventListener('error', function(e){
+  log('⚠️ ' + (e.message || 'Unexpected error'));
+});
+
+function setStep(n, doneUpTo){
+  document.querySelectorAll('.step').forEach(function(stepEl){
+    const s = parseInt(stepEl.dataset.step, 10);
+    stepEl.classList.remove('active','done');
+    if(s < n) stepEl.classList.add('done');
+    else if(s === n) stepEl.classList.add('active');
+  });
+}
+function unlockCard(id){ document.getElementById(id).classList.remove('locked'); }
+
+/* ---------------------------------------------------------------------
+   1. HUMANOID SKELETON DEFINITION (heuristic, A-pose)
+   x/z are fractions of the mesh's bounding-box HALF width / HALF depth.
+   y is a fraction of the mesh's bounding-box HEIGHT, measured from the
+   bottom (feet). "structural" bones carry no skin weight of their own —
+   they only extend the reach / look of the skeleton visualization.
+   --------------------------------------------------------------------- */
+const BONE_DEFS = [
+  { name:'Hips',        parent:null,           y:0.500, x:0,     z:0    },
+  { name:'Spine',       parent:'Hips',         y:0.580, x:0,     z:0    },
+  { name:'Spine1',      parent:'Spine',        y:0.660, x:0,     z:0    },
+  { name:'Spine2',      parent:'Spine1',       y:0.740, x:0,     z:0    },
+  { name:'Neck',        parent:'Spine2',       y:0.805, x:0,     z:0    },
+  { name:'Head',        parent:'Neck',         y:0.865, x:0,     z:0    },
+  { name:'HeadTop_End', parent:'Head',         y:1.000, x:0,     z:0, structural:true },
+
+  { name:'LeftShoulder',parent:'Spine2',       y:0.760, x:0.18,  z:0    },
+  { name:'LeftArm',     parent:'LeftShoulder', y:0.745, x:0.32,  z:0    },
+  { name:'LeftForeArm', parent:'LeftArm',      y:0.600, x:0.62,  z:0.02 },
+  { name:'LeftHand',    parent:'LeftForeArm',  y:0.460, x:1.000, z:0.04 },
+
+  { name:'RightShoulder',parent:'Spine2',      y:0.760, x:-0.18, z:0    },
+  { name:'RightArm',    parent:'RightShoulder',y:0.745, x:-0.32, z:0    },
+  { name:'RightForeArm',parent:'RightArm',     y:0.600, x:-0.62, z:0.02 },
+  { name:'RightHand',   parent:'RightForeArm', y:0.460, x:-1.000,z:0.04 },
+
+  { name:'LeftUpLeg',   parent:'Hips',         y:0.500, x:0.16,  z:0    },
+  { name:'LeftLeg',     parent:'LeftUpLeg',    y:0.270, x:0.16,  z:0    },
+  { name:'LeftFoot',    parent:'LeftLeg',      y:0.045, x:0.16,  z:0.02 },
+  { name:'LeftToe_End', parent:'LeftFoot',     y:0.010, x:0.16,  z:0.30, structural:true },
+
+  { name:'RightUpLeg',  parent:'Hips',         y:0.500, x:-0.16, z:0    },
+  { name:'RightLeg',    parent:'RightUpLeg',   y:0.270, x:-0.16, z:0    },
+  { name:'RightFoot',   parent:'RightLeg',     y:0.045, x:-0.16, z:0.02 },
+  { name:'RightToe_End',parent:'RightFoot',    y:0.010, x:-0.16, z:0.30, structural:true },
+];
+// Every parent→child pair is a skinning "segment", weight-attributed to the PARENT bone.
+const SEGMENTS = BONE_DEFS.filter(function(b){ return b.parent; })
+  .map(function(b){ return { bone:b.parent, from:b.parent, to:b.name }; });
+
+/* ---------------------------------------------------------------------
+   2. THREE.JS SCENE SETUP
+   --------------------------------------------------------------------- */
+const canvas = document.getElementById('gl');
+const renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias:true, alpha:false });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b0d10);
+scene.fog = new THREE.Fog(0x0b0d10, 5, 16);
+
+const camera = new THREE.PerspectiveCamera(42, 1, 0.05, 100);
+
+const hemi = new THREE.HemisphereLight(0xbfe0ff, 0x14171a, 1.0);
+scene.add(hemi);
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.85);
+dirLight.position.set(2.5, 4, 3);
+scene.add(dirLight);
+const fillLight = new THREE.DirectionalLight(0x88aaff, 0.25);
+fillLight.position.set(-3, 2, -2);
+scene.add(fillLight);
+
+const grid = new THREE.GridHelper(6, 24, 0x2a3138, 0x1a1f24);
+scene.add(grid);
+
+const previewMaterial = new THREE.MeshStandardMaterial({
+  color: 0x9aa4ad, roughness:0.75, metalness:0.05, flatShading:true
+});
+const riggedMaterial = new THREE.MeshStandardMaterial({
+  color: 0x4de5c0, roughness:0.55, metalness:0.05, flatShading:true, skinning:true
+});
+
+let currentPreviewMesh = null;   // plain THREE.Mesh before rigging
+let currentGeometry = null;      // normalized BufferGeometry (source of truth)
+let skinnedMesh = null;          // THREE.SkinnedMesh after rigging
+let skeleton = null;             // THREE.Skeleton
+let skeletonHelper = null;
+let bonesByName = {};
+let mixer = null;
+let currentAction = null;
+let allClips = [];               // { name, clip: THREE.AnimationClip }
+let isScrubbing = false;
+
+/* ---- simple custom orbit/zoom controls (mouse + touch) -------------- */
+const camTarget = new THREE.Vector3(0, 0.9, 0);
+let camTheta = Math.PI * 0.28, camPhi = Math.PI * 0.42, camRadius = 3.0;
+function updateCamera(){
+  const x = camTarget.x + camRadius * Math.sin(camPhi) * Math.sin(camTheta);
+  const y = camTarget.y + camRadius * Math.cos(camPhi);
+  const z = camTarget.z + camRadius * Math.sin(camPhi) * Math.cos(camTheta);
+  camera.position.set(x, y, z);
+  camera.lookAt(camTarget);
+}
+(function setupControls(){
+  let dragging = false, lastX = 0, lastY = 0, pinchDist = null;
+  function pt(e){ return (e.touches && e.touches.length) ? { x:e.touches[0].clientX, y:e.touches[0].clientY } : { x:e.clientX, y:e.clientY }; }
+  function touchDist(e){ const a=e.touches[0], b=e.touches[1]; return Math.hypot(a.clientX-b.clientX, a.clientY-b.clientY); }
+  function onDown(e){ dragging = true; const p = pt(e); lastX = p.x; lastY = p.y; }
+  function onMove(e){
+    if(e.touches && e.touches.length === 2){
+      const d = touchDist(e);
+      if(pinchDist != null){
+        camRadius *= pinchDist / d;
+        camRadius = Math.max(0.6, Math.min(10, camRadius));
+        updateCamera();
+      }
+      pinchDist = d;
+      return;
+    }
+    if(!dragging) return;
+    const p = pt(e);
+    camTheta -= (p.x - lastX) * 0.007;
+    camPhi   -= (p.y - lastY) * 0.007;
+    camPhi = Math.max(0.2, Math.min(Math.PI - 0.2, camPhi));
+    lastX = p.x; lastY = p.y;
+    updateCamera();
+  }
+  function onUp(){ dragging = false; pinchDist = null; }
+  canvas.addEventListener('mousedown', onDown);
+  window.addEventListener('mousemove', onMove);
+  window.addEventListener('mouseup', onUp);
+  canvas.addEventListener('touchstart', onDown, { passive:true });
+  canvas.addEventListener('touchmove', onMove, { passive:true });
+  canvas.addEventListener('touchend', onUp);
+  canvas.addEventListener('wheel', function(e){
+    e.preventDefault();
+    camRadius *= (1 + e.deltaY * 0.0012);
+    camRadius = Math.max(0.6, Math.min(10, camRadius));
+    updateCamera();
+  }, { passive:false });
+})();
+updateCamera();
+
+function fitCameraToHeight(height){
+  camTarget.set(0, height * 0.5, 0);
+  camRadius = Math.max(1.6, height * 1.9);
+  updateCamera();
+}
+
+function resizeRenderer(){
+  const wrap = document.getElementById('viewport-wrap');
+  const w = wrap.clientWidth, h = wrap.clientHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / Math.max(h,1);
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', resizeRenderer);
+new ResizeObserver(resizeRenderer).observe(document.getElementById('viewport-wrap'));
+resizeRenderer();
+
+/* ---------------------------------------------------------------------
+   3. MESH PARSERS (OBJ / STL) — no external loader deps
+   --------------------------------------------------------------------- */
+function parseOBJ(text){
+  const positions = [];
+  const normals = [];
+  const outPositions = [];
+  const outNormals = [];
+  let anyNormals = false;
+  const lines = text.split('\n');
+  for(let li=0; li<lines.length; li++){
+    const line = lines[li].trim();
+    if(!line || line[0] === '#') continue;
+    const parts = line.split(/\s+/);
+    const cmd = parts[0];
+    if(cmd === 'v'){
+      positions.push([parseFloat(parts[1]), parseFloat(parts[2]), parseFloat(parts[3])]);
+    } else if(cmd === 'vn'){
+      normals.push([parseFloat(parts[1]), parseFloat(parts[2]), parseFloat(parts[3])]);
+      anyNormals = true;
+    } else if(cmd === 'f'){
+      const verts = [];
+      for(let k=1; k<parts.length; k++){
+        const bits = parts[k].split('/');
+        let vi = parseInt(bits[0], 10);
+        vi = vi > 0 ? vi - 1 : positions.length + vi;
+        let ni = null;
+        if(bits[2] !== undefined && bits[2] !== ''){
+          ni = parseInt(bits[2], 10);
+          ni = ni > 0 ? ni - 1 : normals.length + ni;
+        }
+        verts.push({ v:vi, n:ni });
+      }
+      for(let i=1; i<verts.length-1; i++){
+        const tri = [verts[0], verts[i], verts[i+1]];
+        for(let t=0; t<3; t++){
+          const P = positions[tri[t].v];
+          if(!P) continue;
+          outPositions.push(P[0], P[1], P[2]);
+          const N = (tri[t].n != null) ? normals[tri[t].n] : null;
+          if(N){ outNormals.push(N[0], N[1], N[2]); }
+          else { outNormals.push(0,0,0); }
+        }
+      }
+    }
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(outPositions, 3));
+  if(anyNormals){
+    geometry.setAttribute('normal', new THREE.Float32BufferAttribute(outNormals, 3));
+  } else {
+    geometry.computeVertexNormals();
+  }
+  return geometry;
+}
+
+function parseSTL(arrayBuffer){
+  if(arrayBuffer.byteLength > 84){
+    const dv = new DataView(arrayBuffer);
+    const triCount = dv.getUint32(80, true);
+    const expected = 84 + triCount * 50;
+    if(expected === arrayBuffer.byteLength && triCount > 0){
+      const positions = new Float32Array(triCount*9);
+      const normals = new Float32Array(triCount*9);
+      let offset = 84, pi = 0;
+      for(let i=0; i<triCount; i++){
+        const nx = dv.getFloat32(offset,true), ny = dv.getFloat32(offset+4,true), nz = dv.getFloat32(offset+8,true);
+        offset += 12;
+        for(let v=0; v<3; v++){
+          positions[pi] = dv.getFloat32(offset,true);
+          positions[pi+1] = dv.getFloat32(offset+4,true);
+          positions[pi+2] = dv.getFloat32(offset+8,true);
+          normals[pi] = nx; normals[pi+1] = ny; normals[pi+2] = nz;
+          offset += 12; pi += 3;
+        }
+        offset += 2;
+      }
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+      geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+      return geometry;
+    }
+  }
+  // ASCII fallback
+  const text = new TextDecoder().decode(arrayBuffer);
+  const positions = [], normals = [];
+  const blocks = text.split(/facet normal/i).slice(1);
+  for(const block of blocks){
+    const nm = block.match(/(-?[\d.eE+]+)\s+(-?[\d.eE+]+)\s+(-?[\d.eE+]+)/);
+    const n = nm ? [parseFloat(nm[1]), parseFloat(nm[2]), parseFloat(nm[3])] : [0,0,0];
+    const vm = [...block.matchAll(/vertex\s+(-?[\d.eE+]+)\s+(-?[\d.eE+]+)\s+(-?[\d.eE+]+)/g)];
+    for(let i=0; i<Math.min(3, vm.length); i++){
+      positions.push(parseFloat(vm[i][1]), parseFloat(vm[i][2]), parseFloat(vm[i][3]));
+      normals.push(n[0], n[1], n[2]);
+    }
+  }
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+  return geometry;
+}
+
+/* ---------------------------------------------------------------------
+   3b. GLB / GLTF IMPORT (hand-written — no GLTFLoader addon available)
+   Reads the node hierarchy, bakes every node's world transform into its
+   mesh's vertices, and merges everything into one non-indexed geometry.
+   Any existing skin/skeleton/animation in the source file is intentionally
+   ignored — the whole point of this tool is to (re)generate our own rig.
+   --------------------------------------------------------------------- */
+const GLTF_COMPONENT_SIZE = {5120:1,5121:1,5122:2,5123:2,5125:4,5126:4};
+const GLTF_TYPE_COMPONENTS = {SCALAR:1,VEC2:2,VEC3:3,VEC4:4,MAT2:4,MAT3:9,MAT4:16};
+
+function decodeBase64ToArrayBuffer(base64){
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for(let i=0; i<binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
+function readGLTFAccessor(gltf, buffers, idx){
+  const acc = gltf.accessors[idx];
+  const numComp = GLTF_TYPE_COMPONENTS[acc.type];
+  const compSize = GLTF_COMPONENT_SIZE[acc.componentType];
+  const count = acc.count;
+  const out = new Float32Array(count * numComp);
+  if(acc.bufferView === undefined) return out;
+  const bv = gltf.bufferViews[acc.bufferView];
+  const buffer = buffers[bv.buffer];
+  const baseOffset = (bv.byteOffset||0) + (acc.byteOffset||0);
+  const elementSize = numComp * compSize;
+  const stride = bv.byteStride || elementSize;
+  const dv = new DataView(buffer);
+  for(let i=0; i<count; i++){
+    const elOffset = baseOffset + i*stride;
+    for(let c=0; c<numComp; c++){
+      const o = elOffset + c*compSize;
+      let v;
+      switch(acc.componentType){
+        case 5120: v = dv.getInt8(o); break;
+        case 5121: v = dv.getUint8(o); break;
+        case 5122: v = dv.getInt16(o, true); break;
+        case 5123: v = dv.getUint16(o, true); break;
+        case 5125: v = dv.getUint32(o, true); break;
+        case 5126: v = dv.getFloat32(o, true); break;
+        default: v = 0;
+      }
+      out[i*numComp+c] = v;
+    }
+  }
+  return out;
+}
+
+function nodeLocalMatrix(node){
+  const mat = new THREE.Matrix4();
+  if(node.matrix){ mat.fromArray(node.matrix); return mat; }
+  const t = node.translation || [0,0,0];
+  const r = node.rotation || [0,0,0,1];
+  const s = node.scale || [1,1,1];
+  mat.compose(
+    new THREE.Vector3(t[0], t[1], t[2]),
+    new THREE.Quaternion(r[0], r[1], r[2], r[3]),
+    new THREE.Vector3(s[0], s[1], s[2])
+  );
+  return mat;
+}
+
+function extractMeshFromGLTF(gltf, buffers){
+  const positionsOut = [];
+  const normalsOut = [];
+  let anyNormals = false;
+  const p = new THREE.Vector3(), n = new THREE.Vector3();
+
+  function walk(nodeIdx, parentMatrix, depth){
+    if(depth > 64) return; // guard against malformed cyclic graphs
+    const node = gltf.nodes[nodeIdx];
+    if(!node) return;
+    const worldMatrix = parentMatrix.clone().multiply(nodeLocalMatrix(node));
+    if(node.mesh !== undefined && gltf.meshes[node.mesh]){
+      const normalMatrix = new THREE.Matrix3().getNormalMatrix(worldMatrix);
+      for(const prim of gltf.meshes[node.mesh].primitives){
+        if(prim.mode !== undefined && prim.mode !== 4) continue; // triangles only
+        if(prim.attributes.POSITION === undefined) continue;
+        const positions = readGLTFAccessor(gltf, buffers, prim.attributes.POSITION);
+        const vertCount = gltf.accessors[prim.attributes.POSITION].count;
+        const normals = prim.attributes.NORMAL !== undefined ? readGLTFAccessor(gltf, buffers, prim.attributes.NORMAL) : null;
+        const tPos = new Float32Array(vertCount*3);
+        const tNorm = normals ? new Float32Array(vertCount*3) : null;
+        for(let i=0; i<vertCount; i++){
+          p.set(positions[i*3], positions[i*3+1], positions[i*3+2]).applyMatrix4(worldMatrix);
+          tPos[i*3]=p.x; tPos[i*3+1]=p.y; tPos[i*3+2]=p.z;
+          if(normals){
+            n.set(normals[i*3], normals[i*3+1], normals[i*3+2]).applyMatrix3(normalMatrix).normalize();
+            tNorm[i*3]=n.x; tNorm[i*3+1]=n.y; tNorm[i*3+2]=n.z;
+            if(n.x||n.y||n.z) anyNormals = true;
+          }
+        }
+        function pushVert(vi){
+          positionsOut.push(tPos[vi*3], tPos[vi*3+1], tPos[vi*3+2]);
+          if(tNorm) normalsOut.push(tNorm[vi*3], tNorm[vi*3+1], tNorm[vi*3+2]);
+          else normalsOut.push(0,0,0);
+        }
+        if(prim.indices !== undefined){
+          const idxArr = readGLTFAccessor(gltf, buffers, prim.indices);
+          for(let i=0; i<idxArr.length; i++) pushVert(idxArr[i]);
+        } else {
+          for(let i=0; i<vertCount; i++) pushVert(i);
+        }
+      }
+    }
+    if(node.children){
+      for(const c of node.children) walk(c, worldMatrix, depth+1);
+    }
+  }
+
+  const sceneIdx = gltf.scene !== undefined ? gltf.scene : 0;
+  const sceneObj = (gltf.scenes && gltf.scenes[sceneIdx]) ? gltf.scenes[sceneIdx] : { nodes: (gltf.nodes||[]).map(function(_,i){return i;}) };
+  const identity = new THREE.Matrix4();
+  for(const rootIdx of (sceneObj.nodes||[])) walk(rootIdx, identity, 0);
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positionsOut, 3));
+  if(anyNormals){
+    geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normalsOut, 3));
+  } else {
+    geometry.computeVertexNormals();
+  }
+  return geometry;
+}
+
+async function parseGLB(file){
+  const buf = await file.arrayBuffer();
+  const dv = new DataView(buf);
+  if(dv.getUint32(0, true) !== 0x46546C67) throw new Error('Not a valid .glb file (bad magic header).');
+  const totalLength = dv.getUint32(8, true);
+  let offset = 12, json = null, bin = null;
+  while(offset < totalLength - 8){
+    const chunkLength = dv.getUint32(offset, true);
+    const chunkType = dv.getUint32(offset+4, true);
+    const start = offset + 8;
+    if(chunkType === 0x4E4F534A) json = JSON.parse(new TextDecoder().decode(buf.slice(start, start+chunkLength)));
+    else if(chunkType === 0x004E4942) bin = buf.slice(start, start+chunkLength);
+    offset = start + chunkLength;
+  }
+  if(!json) throw new Error('.glb has no JSON chunk.');
+  const buffers = (json.buffers||[]).map(function(b, i){
+    if(i === 0 && !b.uri && bin) return bin;
+    if(b.uri && b.uri.indexOf('data:') === 0) return decodeBase64ToArrayBuffer(b.uri.split(',')[1]);
+    throw new Error('This .glb references an external buffer file, which isn\'t supported — please re-export with embedded buffers.');
+  });
+  return extractMeshFromGLTF(json, buffers);
+}
+
+async function parseGLTFText(file){
+  const json = JSON.parse(await file.text());
+  const buffers = (json.buffers||[]).map(function(b){
+    if(b.uri && b.uri.indexOf('data:') === 0) return decodeBase64ToArrayBuffer(b.uri.split(',')[1]);
+    throw new Error('This .gltf references an external file ("' + (b.uri||'?') + '"). Please export with embedded/base64 buffers, or upload a .glb instead.');
+  });
+  return extractMeshFromGLTF(json, buffers);
+}
+
+/* ---- procedural sample humanoid (for quick testing, no upload needed) */
+function mergeGeometries(list){
+  let total = 0;
+  for(const g of list) total += g.attributes.position.count;
+  const positions = new Float32Array(total*3);
+  const normals = new Float32Array(total*3);
+  let off = 0;
+  for(const g of list){
+    if(!g.attributes.normal) g.computeVertexNormals();
+    positions.set(g.attributes.position.array, off*3);
+    normals.set(g.attributes.normal.array, off*3);
+    off += g.attributes.position.count;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+  return geo;
+}
+function buildSampleFigure(){
+  const parts = [];
+  function addPart(geo, x,y,z, rx,ry,rz){
+    geo = geo.toNonIndexed();
+    geo.applyMatrix4(new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(rx||0, ry||0, rz||0)));
+    geo.applyMatrix4(new THREE.Matrix4().makeTranslation(x,y,z));
+    parts.push(geo);
+  }
+  addPart(new THREE.SphereGeometry(0.12,14,10), 0, 1.68, 0);
+  addPart(new THREE.CylinderGeometry(0.17,0.19,0.46,12), 0, 1.33, 0);
+  addPart(new THREE.CylinderGeometry(0.19,0.15,0.20,12), 0, 1.00, 0);
+  // left arm (A-pose)
+  addPart(new THREE.CylinderGeometry(0.05,0.055,0.28,8), 0.24,1.34,0, 0,0,-0.55);
+  addPart(new THREE.CylinderGeometry(0.042,0.05,0.26,8), 0.40,1.06,0.02, 0,0,-0.62);
+  addPart(new THREE.SphereGeometry(0.05,8,8), 0.50,0.86,0.03);
+  // right arm
+  addPart(new THREE.CylinderGeometry(0.05,0.055,0.28,8), -0.24,1.34,0, 0,0,0.55);
+  addPart(new THREE.CylinderGeometry(0.042,0.05,0.26,8), -0.40,1.06,0.02, 0,0,0.62);
+  addPart(new THREE.SphereGeometry(0.05,8,8), -0.50,0.86,0.03);
+  // left leg
+  addPart(new THREE.CylinderGeometry(0.085,0.075,0.42,10), 0.11,0.71,0);
+  addPart(new THREE.CylinderGeometry(0.075,0.06,0.42,10), 0.11,0.29,0);
+  addPart(new THREE.BoxGeometry(0.10,0.08,0.24), 0.11,0.04,0.07);
+  // right leg
+  addPart(new THREE.CylinderGeometry(0.085,0.075,0.42,10), -0.11,0.71,0);
+  addPart(new THREE.CylinderGeometry(0.075,0.06,0.42,10), -0.11,0.29,0);
+  addPart(new THREE.BoxGeometry(0.10,0.08,0.24), -0.11,0.04,0.07);
+  return mergeGeometries(parts);
+}
+
+/* ---------------------------------------------------------------------
+   4. LOAD MESH → PREVIEW
+   --------------------------------------------------------------------- */
+function normalizeGeometry(geometry){
+  geometry.computeBoundingBox();
+  const bbox = geometry.boundingBox;
+  const cx = (bbox.max.x + bbox.min.x) / 2;
+  const cz = (bbox.max.z + bbox.min.z) / 2;
+  const by = bbox.min.y;
+  const pos = geometry.attributes.position;
+  for(let i=0; i<pos.count; i++){
+    pos.setXYZ(i, pos.getX(i)-cx, pos.getY(i)-by, pos.getZ(i)-cz);
+  }
+  pos.needsUpdate = true;
+  geometry.computeBoundingBox();
+  return geometry.boundingBox;
+}
+
+function disposeRig(){
+  if(skinnedMesh){ scene.remove(skinnedMesh); skinnedMesh.geometry.dispose(); skinnedMesh = null; }
+  if(skeletonHelper){ scene.remove(skeletonHelper); skeletonHelper = null; }
+  skeleton = null; bonesByName = {}; mixer = null; currentAction = null; allClips = [];
+}
+
+function loadMeshFromGeometry(geometry, label){
+  if(!geometry.attributes.position || geometry.attributes.position.count === 0){
+    log('⚠️ No vertices found in "' + label + '".');
+    return;
+  }
+  disposeRig();
+  if(currentPreviewMesh){ scene.remove(currentPreviewMesh); currentPreviewMesh.geometry.dispose(); currentPreviewMesh = null; }
+
+  const bbox = normalizeGeometry(geometry);
+  currentGeometry = geometry;
+
+  currentPreviewMesh = new THREE.Mesh(geometry, previewMaterial);
+  scene.add(currentPreviewMesh);
+
+  const height = bbox.max.y - bbox.min.y;
+  fitCameraToHeight(height);
+
+  const verts = geometry.attributes.position.count;
+  document.getElementById('statVerts').textContent = verts.toLocaleString();
+  document.getElementById('statTris').textContent = Math.floor(verts/3).toLocaleString();
+  document.getElementById('statBones').textContent = '–';
+  document.getElementById('uploadStats').style.display = 'grid';
+  document.getElementById('statSource').textContent = label;
+  document.getElementById('statHeight').textContent = height.toFixed(2);
+
+  unlockCard('card-rig');
+  document.getElementById('card-anim').classList.add('locked');
+  document.getElementById('card-export').classList.add('locked');
+  setStep(2);
+  log('Loaded <b>' + label + '</b> — ' + verts.toLocaleString() + ' verts, height ' + height.toFixed(2) + ' units.');
+  log('Ready to auto-rig. Tap <b>Auto-Rig mesh</b> below.');
+}
+
+/* ---------------------------------------------------------------------
+   5. SKELETON GENERATION
+   --------------------------------------------------------------------- */
+function computeBonePositions(bbox){
+  const H = (bbox.max.y - bbox.min.y) || 1;
+  const halfW = ((bbox.max.x - bbox.min.x) / 2) || 1;
+  const halfD = ((bbox.max.z - bbox.min.z) / 2) || 1;
+  const cx = (bbox.max.x + bbox.min.x) / 2;
+  const cz = (bbox.max.z + bbox.min.z) / 2;
+  const pos = {};
+  for(const def of BONE_DEFS){
+    pos[def.name] = new THREE.Vector3(
+      cx + def.x * halfW,
+      bbox.min.y + def.y * H,
+      cz + def.z * halfD
+    );
+  }
+  return pos;
+}
+
+function buildBoneHierarchy(bonePositions){
+  const bonesByName_ = {};
+  const boneList = [];
+  for(const def of BONE_DEFS){
+    const bone = new THREE.Bone();
+    bone.name = def.name;
+    boneList.push(bone);
+    bonesByName_[def.name] = bone;
+    if(def.parent) bonesByName_[def.parent].add(bone);
+  }
+  for(const def of BONE_DEFS){
+    const world = bonePositions[def.name];
+    const parentWorld = def.parent ? bonePositions[def.parent] : new THREE.Vector3(0,0,0);
+    bonesByName_[def.name].position.copy(world.clone().sub(parentWorld));
+  }
+  return { boneList, bonesByName: bonesByName_, rootBone: bonesByName_['Hips'] };
+}
+
+/* ---- async, chunked skin-weight computation (keeps mobile UI responsive) */
+function computeSkinningAsync(geometry, bonePositions, boneNameToIndex, onProgress){
+  return new Promise(function(resolve){
+    const posAttr = geometry.attributes.position;
+    const vertCount = posAttr.count;
+    const skinIndices = new Float32Array(vertCount*4);
+    const skinWeights = new Float32Array(vertCount*4);
+    const segs = SEGMENTS.map(function(s){
+      return { idx: boneNameToIndex[s.bone], a: bonePositions[s.from].clone(), b: bonePositions[s.to].clone() };
+    });
+    const K = 4;
+    const BATCH = 6000;
+    let i = 0;
+    const p = new THREE.Vector3(), ab = new THREE.Vector3(), ap = new THREE.Vector3(), closest = new THREE.Vector3();
+    function step(){
+      const end = Math.min(vertCount, i + BATCH);
+      for(; i<end; i++){
+        p.fromBufferAttribute(posAttr, i);
+        const dists = [];
+        for(let s=0; s<segs.length; s++){
+          const seg = segs[s];
+          ab.subVectors(seg.b, seg.a);
+          const len2 = ab.lengthSq() || 1e-8;
+          let t = ap.subVectors(p, seg.a).dot(ab) / len2;
+          t = Math.max(0, Math.min(1, t));
+          closest.copy(seg.a).addScaledVector(ab, t);
+          dists.push({ idx: seg.idx, d: p.distanceTo(closest) });
+        }
+        dists.sort(function(a,b){ return a.d - b.d; });
+        const top = dists.slice(0, K);
+        let wsum = 0;
+        const ws = top.map(function(t2){ const w = 1/Math.pow(t2.d+0.0001, 2); wsum += w; return w; });
+        for(let k=0; k<K; k++){
+          skinIndices[i*4+k] = k < top.length ? top[k].idx : 0;
+          skinWeights[i*4+k] = k < top.length ? ws[k]/wsum : 0;
+        }
+      }
+      if(onProgress) onProgress(end, vertCount);
+      if(end < vertCount){ requestAnimationFrame(step); }
+      else{
+        geometry.setAttribute('skinIndex', new THREE.Float32BufferAttribute(skinIndices, 4));
+        geometry.setAttribute('skinWeight', new THREE.Float32BufferAttribute(skinWeights, 4));
+        resolve();
+      }
+    }
+    step();
+  });
+}
+
+/* ---- orchestration: build skeleton, skin mesh, wire animations -------- */
+async function autoRig(){
+  if(!currentGeometry){ return; }
+  const rigBtn = document.getElementById('rigBtn');
+  rigBtn.disabled = true;
+  rigBtn.textContent = 'Rigging…';
+  try{
+    log('Analyzing bounding box and placing 23 bones (A-pose heuristic)…');
+
+    currentGeometry.computeBoundingBox();
+    const bbox = currentGeometry.boundingBox;
+    const bonePositions = computeBonePositions(bbox);
+    const built = buildBoneHierarchy(bonePositions);
+    const boneList = built.boneList, rootBone = built.rootBone;
+    bonesByName = built.bonesByName;
+
+    const boneNameToIndex = {};
+    boneList.forEach(function(b, idx){ boneNameToIndex[b.name] = idx; });
+
+    log('Computing skin weights (nearest-bone blend, up to 4 influences/vertex)…');
+    await computeSkinningAsync(currentGeometry, bonePositions, boneNameToIndex, function(done, total){
+      if(total > 20000 && done < total){ log('  … ' + done.toLocaleString() + ' / ' + total.toLocaleString() + ' vertices'); }
+    });
+
+    if(currentPreviewMesh){ scene.remove(currentPreviewMesh); currentPreviewMesh = null; }
+
+    skinnedMesh = new THREE.SkinnedMesh(currentGeometry, riggedMaterial);
+    skinnedMesh.add(rootBone);
+    skinnedMesh.updateMatrixWorld(true);
+    skeleton = new THREE.Skeleton(boneList);
+    skinnedMesh.bind(skeleton);
+    scene.add(skinnedMesh);
+
+    skeletonHelper = new THREE.SkeletonHelper(skinnedMesh);
+    skeletonHelper.material.linewidth = 2;
+    scene.add(skeletonHelper);
+    skeletonHelper.visible = document.getElementById('skeletonToggle').checked;
+
+    document.getElementById('statBones').textContent = String(boneList.length);
+    log('Skeleton bound: <b>' + boneList.length + ' bones</b>, ' + currentGeometry.attributes.position.count.toLocaleString() + ' skinned vertices.');
+
+    buildAllClips();
+    mixer = new THREE.AnimationMixer(skinnedMesh);
+    playAnimation('idle');
+
+    unlockCard('card-anim');
+    unlockCard('card-export');
+    setStep(4);
+    rigBtn.textContent = 'Re-run Auto-Rig';
+    log('Rigging complete. Try the animation presets, then export.');
+  } catch(err){
+    console.error(err);
+    log('⚠️ Auto-rig failed: ' + err.message);
+    rigBtn.textContent = 'Auto-Rig mesh';
+  } finally {
+    rigBtn.disabled = false;
+  }
+}
+window.addEventListener('unhandledrejection', function(e){
+  log('⚠️ ' + (e.reason && e.reason.message ? e.reason.message : 'Unexpected async error'));
+});
+
+/* ---------------------------------------------------------------------
+   6. PRESET ANIMATIONS
+   Track keyframes are [time, rotX_deg, rotY_deg, rotZ_deg]. "hipsBob" is a
+   list of [time, yDelta] applied as an extra position track on Hips.
+   --------------------------------------------------------------------- */
+function q(x,y,z){
+  const d = Math.PI/180;
+  return new THREE.Quaternion().setFromEuler(new THREE.Euler(x*d, y*d, z*d, 'XYZ'));
+}
+const ANIM_DEFS = {
+  idle: { name:'Idle', duration:2.4, tracks:{
+    Spine1: [[0,0,0,0],[1.2,1.5,0,0],[2.4,0,0,0]],
+    Head:   [[0,0,0,0],[1.2,0,4,0],[2.4,0,0,0]],
+    Hips:   [[0,0,0,0],[1.2,0,0,1.5],[2.4,0,0,0]],
+  }},
+  walk: { name:'Walk', duration:1.0, tracks:{
+    LeftUpLeg:  [[0,25,0,0],[0.25,0,0,0],[0.5,-25,0,0],[0.75,0,0,0],[1.0,25,0,0]],
+    RightUpLeg: [[0,-25,0,0],[0.25,0,0,0],[0.5,25,0,0],[0.75,0,0,0],[1.0,-25,0,0]],
+    LeftLeg:    [[0,8,0,0],[0.25,45,0,0],[0.5,5,0,0],[0.75,10,0,0],[1.0,8,0,0]],
+    RightLeg:   [[0,5,0,0],[0.25,10,0,0],[0.5,8,0,0],[0.75,45,0,0],[1.0,5,0,0]],
+    LeftArm:    [[0,-22,0,0],[0.25,0,0,0],[0.5,22,0,0],[0.75,0,0,0],[1.0,-22,0,0]],
+    RightArm:   [[0,22,0,0],[0.25,0,0,0],[0.5,-22,0,0],[0.75,0,0,0],[1.0,22,0,0]],
+    Spine:      [[0,0,4,0],[0.25,0,0,0],[0.5,0,-4,0],[0.75,0,0,0],[1.0,0,4,0]],
+  }, hipsBob:[[0,0],[0.25,0.02],[0.5,0],[0.75,0.02],[1.0,0]] },
+  wave: { name:'Wave', duration:2.2, tracks:{
+    RightShoulder:[[0,0,0,0],[0.3,0,0,-15],[1.9,0,0,-15],[2.2,0,0,0]],
+    RightArm:     [[0,0,0,0],[0.3,0,0,-75],[1.9,0,0,-75],[2.2,0,0,0]],
+    RightForeArm: [[0,0,0,0],[0.4,20,0,0],[0.65,-15,0,0],[0.9,20,0,0],[1.15,-15,0,0],[1.4,20,0,0],[1.65,-15,0,0],[1.9,0,0,0],[2.2,0,0,0]],
+    Head:         [[0,0,0,0],[0.3,0,-10,0],[1.9,0,-10,0],[2.2,0,0,0]],
+  }},
+  jump: { name:'Jump', duration:1.3, tracks:{
+    LeftUpLeg: [[0,0,0,0],[0.15,35,0,0],[0.45,-15,0,0],[0.85,25,0,0],[1.0,0,0,0],[1.3,0,0,0]],
+    RightUpLeg:[[0,0,0,0],[0.15,35,0,0],[0.45,-15,0,0],[0.85,25,0,0],[1.0,0,0,0],[1.3,0,0,0]],
+    LeftLeg:   [[0,0,0,0],[0.15,55,0,0],[0.45,5,0,0],[0.85,40,0,0],[1.0,0,0,0],[1.3,0,0,0]],
+    RightLeg:  [[0,0,0,0],[0.15,55,0,0],[0.45,5,0,0],[0.85,40,0,0],[1.0,0,0,0],[1.3,0,0,0]],
+    LeftArm:   [[0,0,0,-10],[0.15,0,0,10],[0.45,0,0,-60],[0.85,0,0,10],[1.0,0,0,-10],[1.3,0,0,-10]],
+    RightArm:  [[0,0,0,10],[0.15,0,0,-10],[0.45,0,0,60],[0.85,0,0,-10],[1.0,0,0,10],[1.3,0,0,10]],
+  }, hipsBob:[[0,0],[0.15,-0.05],[0.45,0.18],[0.85,-0.06],[1.0,0.02],[1.3,0]] },
+};
+
+function buildClip(def){
+  const tracks = [];
+  for(const boneName in def.tracks){
+    if(!bonesByName[boneName]) continue;
+    const kfs = def.tracks[boneName];
+    const times = kfs.map(function(k){ return k[0]; });
+    const values = [];
+    for(const k of kfs){ const quat = q(k[1],k[2],k[3]); values.push(quat.x,quat.y,quat.z,quat.w); }
+    tracks.push(new THREE.QuaternionKeyframeTrack(boneName + '.quaternion', times, values));
+  }
+  if(def.hipsBob && bonesByName['Hips']){
+    const base = bonesByName['Hips'].position.clone();
+    const times = def.hipsBob.map(function(k){ return k[0]; });
+    const values = [];
+    for(const k of def.hipsBob){ values.push(base.x, base.y + k[1], base.z); }
+    tracks.push(new THREE.VectorKeyframeTrack('Hips.position', times, values));
+  }
+  return new THREE.AnimationClip(def.name, def.duration, tracks);
+}
+
+function buildAllClips(){
+  allClips = [];
+  for(const key in ANIM_DEFS){
+    allClips.push({ key: key, name: ANIM_DEFS[key].name, clip: buildClip(ANIM_DEFS[key]) });
+  }
+}
+
+function playAnimation(key){
+  if(!mixer) return;
+  const entry = allClips.find(function(c){ return c.key === key; });
+  if(!entry) return;
+  if(currentAction) currentAction.stop();
+  currentAction = mixer.clipAction(entry.clip);
+  currentAction.setLoop(THREE.LoopRepeat, Infinity);
+  currentAction.paused = false;
+  currentAction.play();
+  document.querySelectorAll('#animChips .chip').forEach(function(btn){
+    btn.classList.toggle('on', btn.dataset.anim === key);
+  });
+  document.getElementById('scrub').max = String(entry.clip.duration);
+  document.getElementById('playBtn').textContent = '⏸ Pause';
+  log('Playing <b>' + entry.name + '</b> (' + entry.clip.duration.toFixed(2) + 's loop).');
+}
+
+/* ---------------------------------------------------------------------
+   7. HAND-ROLLED glTF 2.0 EXPORTER
+   No GLTFExporter addon is available on cdnjs, so this builds a minimal,
+   valid, self-contained .gltf (JSON + base64-embedded buffer) directly:
+   one skinned mesh primitive, one skin, and every baked animation clip.
+   --------------------------------------------------------------------- */
+function BufferPacker(){ this.chunks = []; this.byteLength = 0; }
+BufferPacker.prototype.add = function(typedArray){
+  const pad = (4 - (this.byteLength % 4)) % 4;
+  if(pad > 0){ this.chunks.push(new Uint8Array(pad)); this.byteLength += pad; }
+  const byteOffset = this.byteLength;
+  const bytes = new Uint8Array(typedArray.buffer, typedArray.byteOffset, typedArray.byteLength);
+  this.chunks.push(bytes.slice());
+  this.byteLength += typedArray.byteLength;
+  return { byteOffset: byteOffset, byteLength: typedArray.byteLength };
+};
+BufferPacker.prototype.toBase64 = function(){
+  const full = new Uint8Array(this.byteLength);
+  let o = 0;
+  for(const c of this.chunks){ full.set(c, o); o += c.byteLength; }
+  let binary = '';
+  const chunkSize = 0x8000;
+  for(let i=0; i<full.length; i+=chunkSize){ binary += String.fromCharCode.apply(null, full.subarray(i, i+chunkSize)); }
+  return btoa(binary);
+};
+
+function exportGLTF(){
+  const packer = new BufferPacker();
+  const bufferViews = [];
+  const accessors = [];
+  function addBV(byteOffset, byteLength, target){
+    const bv = { buffer:0, byteOffset:byteOffset, byteLength:byteLength };
+    if(target) bv.target = target;
+    bufferViews.push(bv);
+    return bufferViews.length - 1;
+  }
+  function addAccessor(arr, componentType, type, count, target, withMinMax){
+    const packed = packer.add(arr);
+    const bv = addBV(packed.byteOffset, packed.byteLength, target);
+    const acc = { bufferView: bv, componentType: componentType, count: count, type: type };
+    if(withMinMax){
+      const size = { SCALAR:1, VEC2:2, VEC3:3, VEC4:4 }[type];
+      const min = new Array(size).fill(Infinity), max = new Array(size).fill(-Infinity);
+      for(let i=0; i<count; i++){
+        for(let c=0; c<size; c++){
+          const v = arr[i*size+c];
+          if(v < min[c]) min[c] = v;
+          if(v > max[c]) max[c] = v;
+        }
+      }
+      acc.min = min; acc.max = max;
+    }
+    accessors.push(acc);
+    return accessors.length - 1;
+  }
+
+  const geom = skinnedMesh.geometry;
+  const vertCount = geom.attributes.position.count;
+  const skinIdxF = geom.attributes.skinIndex.array;
+  const skinIdxU8 = new Uint8Array(skinIdxF.length);
+  for(let i=0; i<skinIdxF.length; i++) skinIdxU8[i] = Math.round(skinIdxF[i]);
+
+  const posAcc = addAccessor(new Float32Array(geom.attributes.position.array), 5126, 'VEC3', vertCount, 34962, true);
+  const normAcc = addAccessor(new Float32Array(geom.attributes.normal.array), 5126, 'VEC3', vertCount, 34962, false);
+  const jointAcc = addAccessor(skinIdxU8, 5121, 'VEC4', vertCount, 34962, false);
+  const weightAcc = addAccessor(new Float32Array(geom.attributes.skinWeight.array), 5126, 'VEC4', vertCount, 34962, false);
+
+  const meshes = [{ name:'RiggedCharacter', primitives:[{
+    attributes:{ POSITION:posAcc, NORMAL:normAcc, JOINTS_0:jointAcc, WEIGHTS_0:weightAcc }, mode:4
+  }]}];
+
+  const nodes = [];
+  const nameToNode = {};
+  function writeBoneNode(bone){
+    const idx = nodes.length;
+    nodes.push({ name: bone.name, translation:[bone.position.x, bone.position.y, bone.position.z], children:[] });
+    nameToNode[bone.name] = idx;
+    for(const child of bone.children){
+      if(child.isBone){ nodes[idx].children.push(writeBoneNode(child)); }
+    }
+    if(nodes[idx].children.length === 0) delete nodes[idx].children;
+    return idx;
+  }
+  const rootBoneNodeIdx = writeBoneNode(skeleton.bones[0]);
+
+  const meshNodeIdx = nodes.length;
+  nodes.push({ name:'RiggedCharacter', mesh:0, skin:0 });
+
+  const jointNodeIndices = skeleton.bones.map(function(b){ return nameToNode[b.name]; });
+  const ibmArray = new Float32Array(skeleton.bones.length * 16);
+  const m = new THREE.Matrix4();
+  skeleton.bones.forEach(function(b, i){ m.copy(b.matrixWorld).invert(); ibmArray.set(m.elements, i*16); });
+  const ibmAcc = addAccessor(ibmArray, 5126, 'MAT4', skeleton.bones.length, undefined, false);
+  const skins = [{ inverseBindMatrices: ibmAcc, joints: jointNodeIndices, skeleton: rootBoneNodeIdx }];
+
+  const animations = [];
+  for(const entry of allClips){
+    const channels = [], samplers = [];
+    for(const track of entry.clip.tracks){
+      const dot = track.name.lastIndexOf('.');
+      const boneName = track.name.substring(0, dot);
+      const prop = track.name.substring(dot+1);
+      const path = prop === 'quaternion' ? 'rotation' : 'translation';
+      const nodeIdx = nameToNode[boneName];
+      if(nodeIdx === undefined) continue;
+      const timeAcc = addAccessor(new Float32Array(track.times), 5126, 'SCALAR', track.times.length, undefined, true);
+      const type = path === 'rotation' ? 'VEC4' : 'VEC3';
+      const valAcc = addAccessor(new Float32Array(track.values), 5126, type, track.times.length, undefined, false);
+      samplers.push({ input: timeAcc, output: valAcc, interpolation:'LINEAR' });
+      channels.push({ sampler: samplers.length-1, target:{ node: nodeIdx, path: path } });
+    }
+    animations.push({ name: entry.name, channels: channels, samplers: samplers });
+  }
+
+  const buffers = [{ byteLength: packer.byteLength, uri: 'data:application/octet-stream;base64,' + packer.toBase64() }];
+
+  const gltf = {
+    asset: { version:'2.0', generator:'Mesh-to-Motion Auto-Rig Studio' },
+    scene: 0,
+    scenes: [{ nodes:[meshNodeIdx, rootBoneNodeIdx] }],
+    nodes: nodes, meshes: meshes, skins: skins, animations: animations,
+    buffers: buffers, bufferViews: bufferViews, accessors: accessors,
+  };
+  return JSON.stringify(gltf);
+}
+
+function downloadGLTF(){
+  if(!skinnedMesh){ return; }
+  log('Building .gltf (mesh + skeleton + ' + allClips.length + ' animation clips)…');
+  try{
+    const json = exportGLTF();
+    const blob = new Blob([json], { type:'model/gltf+json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'rigged-character.gltf';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 2000);
+    log('Downloaded <b>rigged-character.gltf</b> (' + (json.length/1024).toFixed(0) + ' KB).');
+  } catch(err){
+    console.error(err);
+    log('⚠️ Export failed: ' + err.message);
+  }
+}
+
+/* ---------------------------------------------------------------------
+   8. UI WIRING
+   --------------------------------------------------------------------- */
+async function handleFile(file){
+  const name = file.name.toLowerCase();
+  log('Reading "' + file.name + '"…');
+  try{
+    let geometry;
+    if(name.endsWith('.obj')){
+      geometry = parseOBJ(await file.text());
+    } else if(name.endsWith('.stl')){
+      geometry = parseSTL(await file.arrayBuffer());
+    } else if(name.endsWith('.glb')){
+      geometry = await parseGLB(file);
+    } else if(name.endsWith('.gltf')){
+      geometry = await parseGLTFText(file);
+    } else if(name.endsWith('.fbx')){
+      log('⚠️ .fbx isn\'t supported (it\'s a complex proprietary format). Please convert it to .glb or .obj first — e.g. import into Blender and export as glTF — then upload the result here.');
+      return;
+    } else {
+      log('⚠️ Unsupported file type — please upload a .obj, .stl, .glb, or .gltf mesh.');
+      return;
+    }
+    loadMeshFromGeometry(geometry, file.name);
+  } catch(err){
+    console.error(err);
+    log('⚠️ Could not parse file: ' + err.message);
+  }
+}
+
+document.getElementById('fileInput').addEventListener('change', function(e){
+  const file = e.target.files[0];
+  if(file) handleFile(file);
+});
+
+document.getElementById('sampleBtn').addEventListener('click', function(){
+  log('Building procedural sample figure…');
+  loadMeshFromGeometry(buildSampleFigure(), 'Sample Figure');
+});
+
+document.getElementById('rigBtn').addEventListener('click', function(){ autoRig(); });
+
+document.getElementById('skeletonToggle').addEventListener('change', function(e){
+  if(skeletonHelper) skeletonHelper.visible = e.target.checked;
+});
+
+document.querySelectorAll('#animChips .chip').forEach(function(btn){
+  btn.addEventListener('click', function(){ playAnimation(btn.dataset.anim); });
+});
+
+document.getElementById('playBtn').addEventListener('click', function(){
+  if(!currentAction) return;
+  currentAction.paused = !currentAction.paused;
+  this.textContent = currentAction.paused ? '▶ Play' : '⏸ Pause';
+});
+
+const scrubEl = document.getElementById('scrub');
+scrubEl.addEventListener('pointerdown', function(){ isScrubbing = true; });
+scrubEl.addEventListener('pointerup', function(){ isScrubbing = false; });
+scrubEl.addEventListener('input', function(e){
+  if(!currentAction) return;
+  currentAction.time = parseFloat(e.target.value);
+  if(mixer) mixer.update(0);
+});
+
+document.getElementById('speed').addEventListener('input', function(e){
+  const v = parseFloat(e.target.value);
+  if(mixer) mixer.timeScale = v;
+  document.getElementById('speedVal').textContent = v.toFixed(2) + '×';
+});
+
+document.getElementById('downloadBtn').addEventListener('click', function(){ downloadGLTF(); });
+
+/* drag & drop onto viewport */
+const dropOverlay = document.getElementById('dropzone-overlay');
+const viewportWrap = document.getElementById('viewport-wrap');
+['dragenter','dragover'].forEach(function(evt){
+  viewportWrap.addEventListener(evt, function(e){ e.preventDefault(); dropOverlay.classList.add('show'); });
+});
+['dragleave','drop'].forEach(function(evt){
+  viewportWrap.addEventListener(evt, function(e){ e.preventDefault(); dropOverlay.classList.remove('show'); });
+});
+viewportWrap.addEventListener('drop', function(e){
+  const file = e.dataTransfer.files && e.dataTransfer.files[0];
+  if(file) handleFile(file);
+});
+
+/* ---------------------------------------------------------------------
+   9. RENDER LOOP
+   --------------------------------------------------------------------- */
+const clock = new THREE.Clock();
+function animate(){
+  requestAnimationFrame(animate);
+  const dt = clock.getDelta();
+  if(mixer && currentAction && !currentAction.paused){
+    mixer.update(dt);
+    if(!isScrubbing){
+      const t = currentAction.time % currentAction.getClip().duration;
+      scrubEl.value = t;
+      document.getElementById('scrubTime').textContent = t.toFixed(2) + 's';
+    }
+  } else if(currentAction && isScrubbing){
+    document.getElementById('scrubTime').textContent = parseFloat(scrubEl.value).toFixed(2) + 's';
+  }
+  renderer.render(scene, camera);
+}
+animate();
+
+log('Welcome. This is a <b>heuristic</b> auto-rigger: it fits a 23-bone humanoid skeleton to your mesh\'s bounding box and skins by proximity — no ML, no manual weight painting.');
+log('Supports .obj, .stl, .glb, .gltf (embedded buffers). Upload a humanoid mesh in A-pose, or tap <b>Use sample figure</b> to try the full pipeline right now.');
+</script>
+</body>
+</html>
