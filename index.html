@@ -64,7 +64,7 @@
   /* ---------- layout ---------- */
   #main{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;}
   #viewport-wrap{flex:1 1 auto;min-height:220px;position:relative;background:radial-gradient(ellipse at 50% 30%, #10141a 0%, #0a0c0f 70%);}
-  #gl{display:block;width:100%;height:100%;}
+  #gl{display:block;width:100%;height:100%;touch-action:none;}
   #viewport-hint{
     position:absolute;left:10px;bottom:10px;font-family:var(--mono);font-size:10.5px;color:var(--muted);
     background:rgba(10,12,15,.55);border:1px solid var(--line);padding:4px 8px;border-radius:6px;
@@ -152,6 +152,12 @@
   #log .t{color:#4a5560;margin-right:6px;}
   #log .logline{white-space:pre-wrap;word-break:break-word;}
 
+  .nudge-grid{
+    display:grid;grid-template-columns:auto 1fr 1fr;gap:6px;align-items:center;margin-top:10px;
+  }
+  .nudge-axis{font-family:var(--mono);font-size:11px;color:var(--muted);text-align:center;}
+  .nudge-grid button.nudge{padding:8px 0;font-family:var(--mono);font-size:16px;}
+
   ::-webkit-scrollbar{width:8px;height:8px;}
   ::-webkit-scrollbar-thumb{background:var(--line);border-radius:4px;}
   ::-webkit-scrollbar-track{background:transparent;}
@@ -174,8 +180,9 @@
     <div class="stepper" id="stepper">
       <div class="step active" data-step="1"><div class="dot">1</div><div class="lbl">Upload</div><div class="bar"></div></div>
       <div class="step" data-step="2"><div class="dot">2</div><div class="lbl">Rig</div><div class="bar"></div></div>
-      <div class="step" data-step="3"><div class="dot">3</div><div class="lbl">Animate</div><div class="bar"></div></div>
-      <div class="step" data-step="4"><div class="dot">4</div><div class="lbl">Export</div><div class="bar"></div></div>
+      <div class="step" data-step="3"><div class="dot">3</div><div class="lbl">Adjust</div><div class="bar"></div></div>
+      <div class="step" data-step="4"><div class="dot">4</div><div class="lbl">Animate</div><div class="bar"></div></div>
+      <div class="step" data-step="5"><div class="dot">5</div><div class="lbl">Export</div><div class="bar"></div></div>
     </div>
   </header>
 
@@ -195,12 +202,13 @@
 
       <section class="card" id="card-upload">
         <h2><span class="num">01</span> Upload mesh</h2>
-        <p class="hint">Best results with a humanoid character in <b>A-pose</b> (arms angled down &amp; out), standing upright, roughly centered. Formats: .obj, .stl, .glb, .gltf (embedded buffers only — no separate .bin/textures).</p>
+        <p class="hint">Standing upright, roughly centered. Formats: .obj, .stl, .glb, .gltf (embedded buffers only — no separate .bin/textures).</p>
         <div class="row">
           <label class="filebtn" for="fileInput">⤒ Choose file</label>
           <input type="file" id="fileInput" accept=".obj,.stl,.glb,.gltf">
           <button class="ghost small" id="sampleBtn">Use sample figure</button>
         </div>
+        <label class="checkline"><input type="checkbox" id="autoFaceToggle" checked> auto-face model forward</label>
         <div class="stat-grid" id="uploadStats" style="display:none;">
           <div><div class="k">Source</div><div class="v" id="statSource">–</div></div>
           <div><div class="k">Height (units)</div><div class="v" id="statHeight">–</div></div>
@@ -208,16 +216,45 @@
       </section>
 
       <section class="card locked" id="card-rig">
-        <h2><span class="num">02</span> Auto-rig</h2>
-        <p class="hint">Generates a 23-bone humanoid skeleton fitted to the mesh's bounding box, then computes skin weights by proximity to each bone.</p>
-        <div class="row">
-          <button class="primary" id="rigBtn">Auto-Rig mesh</button>
+        <h2><span class="num">02</span> Estimate rig</h2>
+        <p class="hint">Pick the pose your mesh is actually in — bone placement is measured from the mesh's own cross-section at each joint height. You'll get a chance to fine-tune every joint by hand next.</p>
+        <div class="row" id="poseChips">
+          <button class="chip small on" data-pose="a">A-Pose</button>
+          <button class="chip small" data-pose="t">T-Pose</button>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <button class="primary" id="rigBtn">Estimate skeleton</button>
           <label class="checkline"><input type="checkbox" id="skeletonToggle" checked> show skeleton</label>
         </div>
       </section>
 
+      <section class="card locked" id="card-adjust">
+        <h2><span class="num">03</span> Adjust joints</h2>
+        <p class="hint">Drag any amber dot in the viewport to move that joint — everything below it in the chain follows, like a real rig. Or pick a joint below and nudge it precisely.</p>
+        <div class="row">
+          <select id="jointSelect" style="flex:1 1 auto;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px;font-family:var(--mono);font-size:12px;"></select>
+        </div>
+        <div class="nudge-grid" id="nudgeGrid">
+          <span class="nudge-axis">X</span>
+          <button class="small nudge" data-axis="x" data-sign="-1">−</button>
+          <button class="small nudge" data-axis="x" data-sign="1">+</button>
+          <span class="nudge-axis">Y</span>
+          <button class="small nudge" data-axis="y" data-sign="-1">−</button>
+          <button class="small nudge" data-axis="y" data-sign="1">+</button>
+          <span class="nudge-axis">Z</span>
+          <button class="small nudge" data-axis="z" data-sign="-1">−</button>
+          <button class="small nudge" data-axis="z" data-sign="1">+</button>
+        </div>
+        <div class="row" style="margin-top:10px;">
+          <button class="ghost small" id="resetJointsBtn">↺ Reset positions</button>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <button class="primary" id="confirmRigBtn" style="width:100%;">✓ Confirm &amp; skin mesh</button>
+        </div>
+      </section>
+
       <section class="card locked" id="card-anim">
-        <h2><span class="num">03</span> Animate</h2>
+        <h2><span class="num">04</span> Animate</h2>
         <div class="row" id="animChips">
           <button class="chip small on" data-anim="idle">Idle</button>
           <button class="chip small" data-anim="walk">Walk</button>
@@ -238,9 +275,10 @@
       </section>
 
       <section class="card locked" id="card-export">
-        <h2><span class="num">04</span> Export</h2>
-        <p class="hint">Downloads a single self-contained <b>.gltf</b> file: rigged mesh + skeleton + all four baked animation clips. Opens in Blender, Unity, most glTF viewers.</p>
-        <button class="primary" id="downloadBtn" style="width:100%;">⬇ Download rigged model (.gltf)</button>
+        <h2><span class="num">05</span> Export</h2>
+        <p class="hint">Both are self-contained <b>.gltf</b> files (mesh + skeleton). Opens in Blender, Unity, most glTF viewers.</p>
+        <button class="primary" id="downloadRiggedBtn" style="width:100%;">⬇ Rigged model only (.gltf)</button>
+        <button class="ghost" id="downloadAnimBtn" style="width:100%;margin-top:8px;">⬇ Rigged + all 4 animations (.gltf)</button>
       </section>
 
       <section class="card">
@@ -324,6 +362,15 @@ const BONE_DEFS = [
   { name:'RightFoot',   parent:'RightLeg',     y:0.045, x:-0.16, z:0.02 },
   { name:'RightToe_End',parent:'RightFoot',    y:0.010, x:-0.16, z:0.30, structural:true },
 ];
+// T-pose height fractions for the arm chain (nearly flat — a real T-pose arm
+// is roughly horizontal, so shoulder/elbow/wrist sit at almost the same Y,
+// unlike A-pose where they descend). x/z above are reused as reach RATIOS
+// in T-pose mode (see computeBonePositions), not absolute fractions.
+const ARM_T_POSE_Y = {
+  LeftShoulder:0.775, LeftArm:0.765, LeftForeArm:0.755, LeftHand:0.745,
+  RightShoulder:0.775, RightArm:0.765, RightForeArm:0.755, RightHand:0.745,
+};
+let poseMode = 'a'; // 'a' = A-pose, 't' = T-pose — set via the pose toggle chips
 // Every parent→child pair is a skinning "segment", weight-attributed to the PARENT bone.
 const SEGMENTS = BONE_DEFS.filter(function(b){ return b.parent; })
   .map(function(b){ return { bone:b.parent, from:b.parent, to:b.name }; });
@@ -371,6 +418,25 @@ let currentAction = null;
 let allClips = [];               // { name, clip: THREE.AnimationClip }
 let isScrubbing = false;
 
+/* ---- manual joint-editing state (drag-to-place, Mixamo-style) -------- */
+let previewRigRoot = null;       // temporary Group holding the bone hierarchy during "adjust" phase
+let jointHandles = null;         // THREE.Group of draggable joint marker spheres
+let selectedJointName = null;
+let rigHeightRef = 1;            // mesh height at rig time, used to scale handle size / nudge steps
+let jointDragActive = false;
+let jointDragBoneName = null;
+const jointRaycaster = new THREE.Raycaster();
+const jointDragPlane = new THREE.Plane();
+const jointDragPoint = new THREE.Vector3();
+function pointerNDC(e){
+  const rect = canvas.getBoundingClientRect();
+  const src = (e.touches && e.touches.length) ? e.touches[0] : e;
+  return new THREE.Vector2(
+    ((src.clientX - rect.left) / rect.width) * 2 - 1,
+    -(((src.clientY - rect.top) / rect.height) * 2 - 1)
+  );
+}
+
 /* ---- simple custom orbit/zoom controls (mouse + touch) -------------- */
 const camTarget = new THREE.Vector3(0, 0.9, 0);
 let camTheta = Math.PI * 0.28, camPhi = Math.PI * 0.42, camRadius = 3.0;
@@ -385,8 +451,30 @@ function updateCamera(){
   let dragging = false, lastX = 0, lastY = 0, pinchDist = null;
   function pt(e){ return (e.touches && e.touches.length) ? { x:e.touches[0].clientX, y:e.touches[0].clientY } : { x:e.clientX, y:e.clientY }; }
   function touchDist(e){ const a=e.touches[0], b=e.touches[1]; return Math.hypot(a.clientX-b.clientX, a.clientY-b.clientY); }
-  function onDown(e){ dragging = true; const p = pt(e); lastX = p.x; lastY = p.y; }
+  function onDown(e){
+    if(jointHandles && jointHandles.children.length){
+      jointRaycaster.setFromCamera(pointerNDC(e), camera);
+      const hits = jointRaycaster.intersectObjects(jointHandles.children);
+      if(hits.length){
+        jointDragActive = true;
+        jointDragBoneName = hits[0].object.userData.boneName;
+        selectJoint(jointDragBoneName);
+        const camDir = new THREE.Vector3();
+        camera.getWorldDirection(camDir);
+        jointDragPlane.setFromNormalAndCoplanarPoint(camDir, hits[0].object.position);
+        return;
+      }
+    }
+    dragging = true; const p = pt(e); lastX = p.x; lastY = p.y;
+  }
   function onMove(e){
+    if(jointDragActive){
+      jointRaycaster.setFromCamera(pointerNDC(e), camera);
+      if(jointRaycaster.ray.intersectPlane(jointDragPlane, jointDragPoint)){
+        moveJointTo(jointDragBoneName, jointDragPoint);
+      }
+      return;
+    }
     if(e.touches && e.touches.length === 2){
       const d = touchDist(e);
       if(pinchDist != null){
@@ -405,7 +493,7 @@ function updateCamera(){
     lastX = p.x; lastY = p.y;
     updateCamera();
   }
-  function onUp(){ dragging = false; pinchDist = null; }
+  function onUp(){ dragging = false; pinchDist = null; jointDragActive = false; jointDragBoneName = null; }
   canvas.addEventListener('mousedown', onDown);
   window.addEventListener('mousemove', onMove);
   window.addEventListener('mouseup', onUp);
@@ -765,10 +853,145 @@ function normalizeGeometry(geometry){
   return geometry.boundingBox;
 }
 
+/* ---- auto-orientation: make X = left/right, Z = front/back(+), Y = up ---
+   Uses two purely geometric cues (no ML): (1) a standing A/T-pose figure is
+   wider shoulder-to-shoulder than it is deep chest-to-back, so whichever
+   horizontal axis has the larger bounding-box extent is treated as
+   left/right; (2) feet point forward, so the foot mass sits offset from the
+   ankle centerline in the forward direction — that offset's sign tells us
+   which way is +Z. Returns a short status string for logging. */
+function sliceCentroidZ(geometry, yCenter, yHalfBand){
+  const pos = geometry.attributes.position;
+  let sum = 0, count = 0;
+  for(let i=0; i<pos.count; i++){
+    if(Math.abs(pos.getY(i) - yCenter) <= yHalfBand){ sum += pos.getZ(i); count++; }
+  }
+  return count > 0 ? sum / count : null;
+}
+function autoOrient(geometry){
+  geometry.computeBoundingBox();
+  let bbox = geometry.boundingBox;
+  const H = (bbox.max.y - bbox.min.y) || 1;
+  const dx = bbox.max.x - bbox.min.x;
+  const dz = bbox.max.z - bbox.min.z;
+  const pos = geometry.attributes.position;
+  let swapped = false;
+
+  if(dz > dx * 1.08){
+    for(let i=0; i<pos.count; i++){
+      const x = pos.getX(i), z = pos.getZ(i);
+      pos.setXYZ(i, z, pos.getY(i), -x);
+    }
+    pos.needsUpdate = true;
+    geometry.computeBoundingBox();
+    bbox = geometry.boundingBox;
+    swapped = true;
+  }
+
+  const yMin = bbox.min.y;
+  const ankleZ = sliceCentroidZ(geometry, yMin + 0.09*H, 0.02*H);
+  const footZ = sliceCentroidZ(geometry, yMin + 0.02*H, 0.02*H);
+
+  if(ankleZ === null || footZ === null){
+    return swapped ? 'Rotated 90° (matched left/right to the wider axis); couldn\'t confirm front/back from foot shape.'
+                   : 'Couldn\'t confidently detect facing direction (no clear foot region found) — left as uploaded.';
+  }
+  const diff = footZ - ankleZ;
+  if(Math.abs(diff) < 1e-5){
+    return swapped ? 'Rotated 90° to align left/right; front/back was ambiguous, left as-is.' : 'Facing direction was ambiguous — left as uploaded.';
+  }
+  if(diff < 0){
+    for(let i=0; i<pos.count; i++){
+      pos.setXYZ(i, -pos.getX(i), pos.getY(i), -pos.getZ(i));
+    }
+    pos.needsUpdate = true;
+    return (swapped ? 'Rotated 90° + 180°' : 'Rotated 180°') + ' to face +Z, based on foot orientation.';
+  }
+  return (swapped ? 'Rotated 90° to align left/right; already' : 'Already') + ' facing forward (+Z).';
+}
+
 function disposeRig(){
   if(skinnedMesh){ scene.remove(skinnedMesh); skinnedMesh.geometry.dispose(); skinnedMesh = null; }
   if(skeletonHelper){ scene.remove(skeletonHelper); skeletonHelper = null; }
+  if(jointHandles){
+    scene.remove(jointHandles);
+    jointHandles.children.forEach(function(h){ h.geometry.dispose(); h.material.dispose(); });
+    jointHandles = null;
+  }
+  if(previewRigRoot){ scene.remove(previewRigRoot); previewRigRoot = null; }
   skeleton = null; bonesByName = {}; mixer = null; currentAction = null; allClips = [];
+  selectedJointName = null; jointDragActive = false; jointDragBoneName = null;
+  document.getElementById('card-adjust').classList.add('locked');
+  document.getElementById('card-anim').classList.add('locked');
+  document.getElementById('card-export').classList.add('locked');
+}
+
+/* ---- joint marker handles: create, sync, select, move, nudge --------- */
+function createJointHandles(boneList){
+  const group = new THREE.Group();
+  const handleRadius = Math.max(0.018, rigHeightRef * 0.028);
+  const geo = new THREE.SphereGeometry(handleRadius, 14, 10);
+  const wp = new THREE.Vector3();
+  boneList.forEach(function(bone){
+    const mat = new THREE.MeshStandardMaterial({ color:0x4de5c0, emissive:0x0d2a22, roughness:0.35, depthTest:false });
+    const handle = new THREE.Mesh(geo, mat);
+    handle.renderOrder = 10;
+    handle.userData.boneName = bone.name;
+    bone.getWorldPosition(wp);
+    handle.position.copy(wp);
+    group.add(handle);
+  });
+  return group;
+}
+function refreshJointHandles(){
+  if(!jointHandles) return;
+  const wp = new THREE.Vector3();
+  jointHandles.children.forEach(function(h){
+    const bone = bonesByName[h.userData.boneName];
+    if(bone){ bone.getWorldPosition(wp); h.position.copy(wp); }
+  });
+}
+function selectJoint(boneName){
+  selectedJointName = boneName;
+  if(jointHandles){
+    jointHandles.children.forEach(function(h){
+      const isSel = h.userData.boneName === boneName;
+      h.material.color.set(isSel ? 0xffb454 : 0x4de5c0);
+      h.material.emissive.set(isSel ? 0x3d2600 : 0x0d2a22);
+      h.scale.setScalar(isSel ? 1.7 : 1.0);
+    });
+  }
+  const sel = document.getElementById('jointSelect');
+  if(sel && sel.value !== boneName) sel.value = boneName;
+}
+function moveJointTo(boneName, worldPoint){
+  const bone = bonesByName[boneName];
+  if(!bone || !bone.parent) return;
+  bone.parent.updateMatrixWorld(true);
+  const local = bone.parent.worldToLocal(worldPoint.clone());
+  bone.position.copy(local);
+  bone.updateMatrixWorld(true);
+  refreshJointHandles();
+}
+function nudgeSelectedJoint(axis, sign){
+  if(!selectedJointName) return;
+  const bone = bonesByName[selectedJointName];
+  if(!bone) return;
+  const wp = new THREE.Vector3();
+  bone.getWorldPosition(wp);
+  const step = rigHeightRef * 0.01;
+  wp[axis] += sign * step;
+  moveJointTo(selectedJointName, wp);
+}
+function populateJointSelect(boneList){
+  const sel = document.getElementById('jointSelect');
+  sel.innerHTML = '';
+  boneList.forEach(function(bone){
+    const opt = document.createElement('option');
+    opt.value = bone.name;
+    opt.textContent = bone.name.replace(/_End$/, ' (tip)');
+    sel.appendChild(opt);
+  });
 }
 
 function loadMeshFromGeometry(geometry, label){
@@ -779,7 +1002,14 @@ function loadMeshFromGeometry(geometry, label){
   disposeRig();
   if(currentPreviewMesh){ scene.remove(currentPreviewMesh); currentPreviewMesh.geometry.dispose(); currentPreviewMesh = null; }
 
-  const bbox = normalizeGeometry(geometry);
+  let bbox = normalizeGeometry(geometry);
+
+  if(document.getElementById('autoFaceToggle').checked){
+    const status = autoOrient(geometry);
+    bbox = normalizeGeometry(geometry); // re-center/re-floor after any rotation
+    log('Auto-face: ' + status);
+  }
+
   currentGeometry = geometry;
 
   currentPreviewMesh = new THREE.Mesh(geometry, previewMaterial);
@@ -796,30 +1026,101 @@ function loadMeshFromGeometry(geometry, label){
   document.getElementById('statSource').textContent = label;
   document.getElementById('statHeight').textContent = height.toFixed(2);
 
+
   unlockCard('card-rig');
-  document.getElementById('card-anim').classList.add('locked');
-  document.getElementById('card-export').classList.add('locked');
   setStep(2);
   log('Loaded <b>' + label + '</b> — ' + verts.toLocaleString() + ' verts, height ' + height.toFixed(2) + ' units.');
-  log('Ready to auto-rig. Tap <b>Auto-Rig mesh</b> below.');
+  log('Ready to estimate a skeleton. Tap <b>Estimate skeleton</b> below.');
 }
 
 /* ---------------------------------------------------------------------
    5. SKELETON GENERATION
    --------------------------------------------------------------------- */
-function computeBonePositions(bbox){
+function computeBonePositions(geometry, bbox, pose){
   const H = (bbox.max.y - bbox.min.y) || 1;
   const halfW = ((bbox.max.x - bbox.min.x) / 2) || 1;
   const halfD = ((bbox.max.z - bbox.min.z) / 2) || 1;
   const cx = (bbox.max.x + bbox.min.x) / 2;
   const cz = (bbox.max.z + bbox.min.z) / 2;
+  const posAttr = geometry.attributes.position;
+
+  // mean X/Z of every point within a thin band at yFrac — used to center the torso chain
+  function sliceCentroid(yFrac){
+    const yC = bbox.min.y + yFrac*H, band = Math.max(0.02*H, 0.015);
+    let sx=0, sz=0, c=0;
+    for(let i=0; i<posAttr.count; i++){
+      if(Math.abs(posAttr.getY(i)-yC) > band) continue;
+      sx += posAttr.getX(i); sz += posAttr.getZ(i); c++;
+    }
+    return c>0 ? {x:sx/c, z:sz/c} : null;
+  }
+  // farthest point on the given side at yFrac — used per-joint for A-pose arms
+  function sideExtent(yFrac, side){
+    const yC = bbox.min.y + yFrac*H, band = Math.max(0.025*H, 0.02);
+    let best = null;
+    for(let i=0; i<posAttr.count; i++){
+      if(Math.abs(posAttr.getY(i)-yC) > band) continue;
+      const x = posAttr.getX(i);
+      if(side>0 && x>0 && (best===null || x>best)) best = x;
+      if(side<0 && x<0 && (best===null || x<best)) best = x;
+    }
+    return best;
+  }
+  // mean X of the given side's cluster at yFrac — used for legs (both poses)
+  function sideMean(yFrac, side){
+    const yC = bbox.min.y + yFrac*H, band = Math.max(0.03*H, 0.02);
+    let s=0, c=0;
+    for(let i=0; i<posAttr.count; i++){
+      if(Math.abs(posAttr.getY(i)-yC) > band) continue;
+      const x = posAttr.getX(i);
+      if((side>0 && x>0) || (side<0 && x<0)){ s += x; c++; }
+    }
+    return c>0 ? s/c : null;
+  }
+
+  // T-pose: joints are roughly co-planar in Y, so measure ONE overall
+  // left/right reach across the whole shoulder band and place joints
+  // proportionally along it instead of per-joint (which can't distinguish
+  // shoulder/elbow/hand when they all sit at nearly the same height).
+  let reach = null;
+  if(pose === 't'){
+    let bestL=null, bestR=null;
+    for(let i=0; i<posAttr.count; i++){
+      const yf = (posAttr.getY(i)-bbox.min.y)/H;
+      if(yf < 0.66 || yf > 0.86) continue;
+      const x = posAttr.getX(i);
+      if(x>0 && (bestL===null || x>bestL)) bestL = x;
+      if(x<0 && (bestR===null || x<bestR)) bestR = x;
+    }
+    reach = { left:bestL, right:bestR };
+  }
+
+  const TORSO = { Hips:1, Spine:1, Spine1:1, Spine2:1, Neck:1, Head:1, HeadTop_End:1 };
   const pos = {};
   for(const def of BONE_DEFS){
-    pos[def.name] = new THREE.Vector3(
-      cx + def.x * halfW,
-      bbox.min.y + def.y * H,
-      cz + def.z * halfD
-    );
+    let x = cx + def.x*halfW;
+    let z = cz + def.z*halfD;
+    const isArm = ARM_T_POSE_Y.hasOwnProperty(def.name);
+    const yFrac = (isArm && pose === 't') ? ARM_T_POSE_Y[def.name] : def.y;
+    let y = bbox.min.y + yFrac*H;
+    const side = def.name.indexOf('Left') === 0 ? 1 : (def.name.indexOf('Right') === 0 ? -1 : 0);
+
+    if(TORSO[def.name]){
+      const c = sliceCentroid(def.y);
+      if(c){ x = c.x; z = c.z; }
+    } else if(side !== 0 && /UpLeg|Leg|Foot|Toe/.test(def.name)){
+      const m = sideMean(def.y, side);
+      if(m !== null) x = m;
+    } else if(isArm && side !== 0){
+      if(pose === 'a'){
+        const e = sideExtent(def.y, side);
+        if(e !== null) x = e;
+      } else if(reach){
+        const r = side>0 ? reach.left : reach.right;
+        if(r !== null) x = r * Math.abs(def.x); // def.x already encodes the reach ratio; r carries the correct sign
+      }
+    }
+    pos[def.name] = new THREE.Vector3(x, y, z);
   }
   return pos;
 }
@@ -892,29 +1193,74 @@ function computeSkinningAsync(geometry, bonePositions, boneNameToIndex, onProgre
 }
 
 /* ---- orchestration: build skeleton, skin mesh, wire animations -------- */
-async function autoRig(){
+function estimateRig(){
   if(!currentGeometry){ return; }
   const rigBtn = document.getElementById('rigBtn');
   rigBtn.disabled = true;
-  rigBtn.textContent = 'Rigging…';
   try{
-    log('Analyzing bounding box and placing 23 bones (A-pose heuristic)…');
+    log('Analyzing mesh cross-sections and placing 23 bones (' + (poseMode==='a'?'A-pose':'T-pose') + ' mode)…');
+    disposeRig(); // clear any previous handles/skeleton before building the new one
 
     currentGeometry.computeBoundingBox();
     const bbox = currentGeometry.boundingBox;
-    const bonePositions = computeBonePositions(bbox);
+    rigHeightRef = (bbox.max.y - bbox.min.y) || 1;
+    const bonePositions = computeBonePositions(currentGeometry, bbox, poseMode);
     const built = buildBoneHierarchy(bonePositions);
-    const boneList = built.boneList, rootBone = built.rootBone;
     bonesByName = built.bonesByName;
 
+    previewRigRoot = new THREE.Group();
+    previewRigRoot.add(built.rootBone);
+    scene.add(previewRigRoot);
+    previewRigRoot.updateMatrixWorld(true);
+
+    skeletonHelper = new THREE.SkeletonHelper(previewRigRoot);
+    skeletonHelper.material.linewidth = 2;
+    scene.add(skeletonHelper);
+    skeletonHelper.visible = document.getElementById('skeletonToggle').checked;
+
+    jointHandles = createJointHandles(built.boneList);
+    scene.add(jointHandles);
+    populateJointSelect(built.boneList);
+    selectJoint('Hips');
+
+    document.getElementById('statBones').textContent = String(built.boneList.length);
+    unlockCard('card-adjust');
+    setStep(3);
+    log('Estimated <b>' + built.boneList.length + ' joints</b>. Drag the amber dots in the viewport, or use the dropdown + nudge buttons, then tap <b>Confirm &amp; skin mesh</b>.');
+  } catch(err){
+    console.error(err);
+    log('⚠️ Rig estimate failed: ' + err.message);
+  } finally {
+    rigBtn.disabled = false;
+  }
+}
+
+async function confirmRig(){
+  if(!previewRigRoot || !bonesByName['Hips']){ return; }
+  const btn = document.getElementById('confirmRigBtn');
+  btn.disabled = true;
+  btn.textContent = 'Skinning…';
+  try{
+    const boneList = [];
+    previewRigRoot.traverse(function(o){ if(o.isBone) boneList.push(o); });
     const boneNameToIndex = {};
     boneList.forEach(function(b, idx){ boneNameToIndex[b.name] = idx; });
+    const bonePositions = {};
+    const wp = new THREE.Vector3();
+    boneList.forEach(function(b){ b.getWorldPosition(wp); bonePositions[b.name] = wp.clone(); });
 
-    log('Computing skin weights (nearest-bone blend, up to 4 influences/vertex)…');
+    log('Computing skin weights from final joint placement (nearest-bone blend, up to 4 influences/vertex)…');
     await computeSkinningAsync(currentGeometry, bonePositions, boneNameToIndex, function(done, total){
       if(total > 20000 && done < total){ log('  … ' + done.toLocaleString() + ' / ' + total.toLocaleString() + ' vertices'); }
     });
 
+    const rootBone = bonesByName['Hips'];
+    previewRigRoot.remove(rootBone);
+    scene.remove(previewRigRoot); previewRigRoot = null;
+    scene.remove(jointHandles);
+    jointHandles.children.forEach(function(h){ h.geometry.dispose(); h.material.dispose(); });
+    jointHandles = null;
+    if(skeletonHelper){ scene.remove(skeletonHelper); skeletonHelper = null; }
     if(currentPreviewMesh){ scene.remove(currentPreviewMesh); currentPreviewMesh = null; }
 
     skinnedMesh = new THREE.SkinnedMesh(currentGeometry, riggedMaterial);
@@ -929,24 +1275,23 @@ async function autoRig(){
     scene.add(skeletonHelper);
     skeletonHelper.visible = document.getElementById('skeletonToggle').checked;
 
-    document.getElementById('statBones').textContent = String(boneList.length);
     log('Skeleton bound: <b>' + boneList.length + ' bones</b>, ' + currentGeometry.attributes.position.count.toLocaleString() + ' skinned vertices.');
 
     buildAllClips();
     mixer = new THREE.AnimationMixer(skinnedMesh);
     playAnimation('idle');
 
+    document.getElementById('card-adjust').classList.add('locked');
     unlockCard('card-anim');
     unlockCard('card-export');
-    setStep(4);
-    rigBtn.textContent = 'Re-run Auto-Rig';
-    log('Rigging complete. Try the animation presets, then export.');
+    setStep(5);
+    log('Skinning complete. Try the animation presets, then export.');
   } catch(err){
     console.error(err);
-    log('⚠️ Auto-rig failed: ' + err.message);
-    rigBtn.textContent = 'Auto-Rig mesh';
+    log('⚠️ Confirm & skin failed: ' + err.message);
   } finally {
-    rigBtn.disabled = false;
+    btn.disabled = false;
+    btn.textContent = '✓ Confirm & skin mesh';
   }
 }
 window.addEventListener('unhandledrejection', function(e){
@@ -1063,7 +1408,7 @@ BufferPacker.prototype.toBase64 = function(){
   return btoa(binary);
 };
 
-function exportGLTF(){
+function exportGLTF(includeAnimations){
   const packer = new BufferPacker();
   const bufferViews = [];
   const accessors = [];
@@ -1133,22 +1478,24 @@ function exportGLTF(){
   const skins = [{ inverseBindMatrices: ibmAcc, joints: jointNodeIndices, skeleton: rootBoneNodeIdx }];
 
   const animations = [];
-  for(const entry of allClips){
-    const channels = [], samplers = [];
-    for(const track of entry.clip.tracks){
-      const dot = track.name.lastIndexOf('.');
-      const boneName = track.name.substring(0, dot);
-      const prop = track.name.substring(dot+1);
-      const path = prop === 'quaternion' ? 'rotation' : 'translation';
-      const nodeIdx = nameToNode[boneName];
-      if(nodeIdx === undefined) continue;
-      const timeAcc = addAccessor(new Float32Array(track.times), 5126, 'SCALAR', track.times.length, undefined, true);
-      const type = path === 'rotation' ? 'VEC4' : 'VEC3';
-      const valAcc = addAccessor(new Float32Array(track.values), 5126, type, track.times.length, undefined, false);
-      samplers.push({ input: timeAcc, output: valAcc, interpolation:'LINEAR' });
-      channels.push({ sampler: samplers.length-1, target:{ node: nodeIdx, path: path } });
+  if(includeAnimations){
+    for(const entry of allClips){
+      const channels = [], samplers = [];
+      for(const track of entry.clip.tracks){
+        const dot = track.name.lastIndexOf('.');
+        const boneName = track.name.substring(0, dot);
+        const prop = track.name.substring(dot+1);
+        const path = prop === 'quaternion' ? 'rotation' : 'translation';
+        const nodeIdx = nameToNode[boneName];
+        if(nodeIdx === undefined) continue;
+        const timeAcc = addAccessor(new Float32Array(track.times), 5126, 'SCALAR', track.times.length, undefined, true);
+        const type = path === 'rotation' ? 'VEC4' : 'VEC3';
+        const valAcc = addAccessor(new Float32Array(track.values), 5126, type, track.times.length, undefined, false);
+        samplers.push({ input: timeAcc, output: valAcc, interpolation:'LINEAR' });
+        channels.push({ sampler: samplers.length-1, target:{ node: nodeIdx, path: path } });
+      }
+      animations.push({ name: entry.name, channels: channels, samplers: samplers });
     }
-    animations.push({ name: entry.name, channels: channels, samplers: samplers });
   }
 
   const buffers = [{ byteLength: packer.byteLength, uri: 'data:application/octet-stream;base64,' + packer.toBase64() }];
@@ -1157,24 +1504,25 @@ function exportGLTF(){
     asset: { version:'2.0', generator:'Mesh-to-Motion Auto-Rig Studio' },
     scene: 0,
     scenes: [{ nodes:[meshNodeIdx, rootBoneNodeIdx] }],
-    nodes: nodes, meshes: meshes, skins: skins, animations: animations,
+    nodes: nodes, meshes: meshes, skins: skins,
     buffers: buffers, bufferViews: bufferViews, accessors: accessors,
   };
+  if(animations.length) gltf.animations = animations;
   return JSON.stringify(gltf);
 }
 
-function downloadGLTF(){
+function downloadGLTF(includeAnimations){
   if(!skinnedMesh){ return; }
-  log('Building .gltf (mesh + skeleton + ' + allClips.length + ' animation clips)…');
+  log('Building .gltf (' + (includeAnimations ? ('mesh + skeleton + ' + allClips.length + ' animation clips') : 'mesh + skeleton only') + ')…');
   try{
-    const json = exportGLTF();
+    const json = exportGLTF(includeAnimations);
     const blob = new Blob([json], { type:'model/gltf+json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url; a.download = 'rigged-character.gltf';
+    a.href = url; a.download = includeAnimations ? 'rigged-character-animated.gltf' : 'rigged-character.gltf';
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     setTimeout(function(){ URL.revokeObjectURL(url); }, 2000);
-    log('Downloaded <b>rigged-character.gltf</b> (' + (json.length/1024).toFixed(0) + ' KB).');
+    log('Downloaded <b>' + a.download + '</b> (' + (json.length/1024).toFixed(0) + ' KB).');
   } catch(err){
     console.error(err);
     log('⚠️ Export failed: ' + err.message);
@@ -1221,11 +1569,33 @@ document.getElementById('sampleBtn').addEventListener('click', function(){
   loadMeshFromGeometry(buildSampleFigure(), 'Sample Figure');
 });
 
-document.getElementById('rigBtn').addEventListener('click', function(){ autoRig(); });
+document.getElementById('rigBtn').addEventListener('click', function(){ estimateRig(); });
+
+document.querySelectorAll('#poseChips .chip').forEach(function(btn){
+  btn.addEventListener('click', function(){
+    poseMode = btn.dataset.pose;
+    document.querySelectorAll('#poseChips .chip').forEach(function(b){ b.classList.toggle('on', b === btn); });
+  });
+});
 
 document.getElementById('skeletonToggle').addEventListener('change', function(e){
   if(skeletonHelper) skeletonHelper.visible = e.target.checked;
 });
+
+document.getElementById('jointSelect').addEventListener('change', function(e){ selectJoint(e.target.value); });
+
+document.querySelectorAll('#nudgeGrid .nudge').forEach(function(btn){
+  btn.addEventListener('click', function(){
+    nudgeSelectedJoint(btn.dataset.axis, parseInt(btn.dataset.sign, 10));
+  });
+});
+
+document.getElementById('resetJointsBtn').addEventListener('click', function(){
+  log('Resetting joints to the measured estimate…');
+  estimateRig();
+});
+
+document.getElementById('confirmRigBtn').addEventListener('click', function(){ confirmRig(); });
 
 document.querySelectorAll('#animChips .chip').forEach(function(btn){
   btn.addEventListener('click', function(){ playAnimation(btn.dataset.anim); });
@@ -1252,7 +1622,8 @@ document.getElementById('speed').addEventListener('input', function(e){
   document.getElementById('speedVal').textContent = v.toFixed(2) + '×';
 });
 
-document.getElementById('downloadBtn').addEventListener('click', function(){ downloadGLTF(); });
+document.getElementById('downloadRiggedBtn').addEventListener('click', function(){ downloadGLTF(false); });
+document.getElementById('downloadAnimBtn').addEventListener('click', function(){ downloadGLTF(true); });
 
 /* drag & drop onto viewport */
 const dropOverlay = document.getElementById('dropzone-overlay');
@@ -1289,8 +1660,9 @@ function animate(){
 }
 animate();
 
-log('Welcome. This is a <b>heuristic</b> auto-rigger: it fits a 23-bone humanoid skeleton to your mesh\'s bounding box and skins by proximity — no ML, no manual weight painting.');
-log('Supports .obj, .stl, .glb, .gltf (embedded buffers). Upload a humanoid mesh in A-pose, or tap <b>Use sample figure</b> to try the full pipeline right now.');
+log('Welcome. This is a <b>heuristic</b> auto-rigger: bones are measured from your mesh\'s own cross-sections (not just guessed), matched to whichever pose you pick (A-pose / T-pose), and skinned by proximity — no ML, no manual weight painting.');
+log('Auto-face-forward will try to orient your upload correctly; toggle it off in step 1 if it ever guesses wrong.');
+log('Supports .obj, .stl, .glb, .gltf (embedded buffers). Upload a humanoid mesh, or tap <b>Use sample figure</b> to try the full pipeline right now.');
 </script>
 </body>
 </html>
