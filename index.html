@@ -284,6 +284,7 @@
         <h2><span class="num">03</span> Adjust joints</h2>
         <p class="hint">Drag any amber dot in the viewport — it moves on its own, like Mixamo's joint markers, without dragging the rest of the chain with it. Or pick a joint below and nudge it precisely.</p>
         <label class="checkline"><input type="checkbox" id="symmetryToggle" checked> mirror left/right while editing</label>
+        <label class="checkline"><input type="checkbox" id="snapToggle"> snap to grid (2% of model height)</label>
         <div class="row" style="margin-top:8px;">
           <select id="jointSelect" style="flex:1 1 auto;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px;font-family:var(--mono);font-size:12px;"></select>
         </div>
@@ -1427,14 +1428,26 @@ function selectJoint(boneName){
   if(sel && sel.value !== boneName) sel.value = boneName;
 }
 let symmetryEnabled = true;
+let snapEnabled = false;
 function getMirrorBoneName(name){
   if(name.indexOf('Left') >= 0) return name.replace('Left', 'Right');
   if(name.indexOf('Right') >= 0) return name.replace('Right', 'Left');
   return null;
 }
+/* snapping to a fixed fraction of the model's own height keeps the grid
+   sensible regardless of what units/scale the uploaded mesh uses */
+function applySnap(point){
+  if(!snapEnabled) return point;
+  const s = (rigHeightRef || 1) * 0.02;
+  point.x = Math.round(point.x / s) * s;
+  point.y = Math.round(point.y / s) * s;
+  point.z = Math.round(point.z / s) * s;
+  return point;
+}
 function moveJointTo(boneName, worldPoint, skipMirror){
   const bone = bonesByName[boneName];
   if(!bone || !bone.parent) return;
+  applySnap(worldPoint);
 
   // Collect every descendant (parent-before-child order) and remember where each
   // one currently sits in world space, so we can hold them still after the move —
@@ -2147,6 +2160,76 @@ function makeEulerTrack(boneName, times, fn){
   }
   return new THREE.QuaternionKeyframeTrack(boneName + '.quaternion', times.slice(), values);
 }
+/* ---------------------------------------------------------------------
+   Arm-chain builder with explicit palm control.
+   setFromUnitVectors gives the rotation with the smallest angle between two
+   vectors — that fixes 2 of the 3 rotational degrees of freedom (which way
+   the limb points) but leaves the third (twist/roll around that pointing
+   axis) wherever the minimal rotation happens to land. That's fine for the
+   limb's own silhouette, but it means anything relying on a SPECIFIC facing
+   — like a palm — ends up pointing in an arbitrary direction.
+   This computes the actual accumulated Shoulder→Arm→ForeArm rotation at
+   each keyframe and solves for the exact additional Hand-local twist needed
+   to bring an assumed bind-pose palm reference (down, the common rest
+   convention for both A- and T-pose rigs) to a requested WORLD direction —
+   so "palm faces forward" means the palm actually faces forward, regardless
+   of how the arm above it is currently posed.
+   ---------------------------------------------------------------------
+   shoulderFn/armFn/foreArmFn(t) -> [x,y,z] target direction (bind-frame)
+   palmFn(t) -> [x,y,z] WORLD direction the palm should face, or null to
+   leave the hand unrotated relative to the forearm at that frame. */
+function buildArmChainTracks(side, times, shoulderFn, armFn, foreArmFn, palmFn){
+  const tracks = [];
+  const armBind = armBindDir[side+'Arm'];
+  const foreArmBind = armBindDir[side+'ForeArm'];
+  if(!bonesByName[side+'Arm'] || !armBind) return tracks;
+
+  const shoulderValues = [], armValues = [], foreArmValues = [], handValues = [];
+  const down = new THREE.Vector3(0,-1,0);
+  const tmp = new THREE.Vector3(), desired = new THREE.Vector3(), palmLocal = new THREE.Vector3();
+  const shoulderQ = new THREE.Quaternion(), armQ = new THREE.Quaternion(),
+        faQ = new THREE.Quaternion(), parentQ = new THREE.Quaternion(), handQ = new THREE.Quaternion();
+  const hasShoulder = !!(shoulderFn && bonesByName[side+'Shoulder']);
+  const hasForeArm = !!(foreArmBind && bonesByName[side+'ForeArm']);
+  const hasHand = !!(palmFn && hasForeArm && bonesByName[side+'Hand']);
+
+  for(const t of times){
+    if(hasShoulder){
+      const sd = shoulderFn(t);
+      shoulderQ.copy(q(sd[0], sd[1], sd[2]));
+      shoulderValues.push(shoulderQ.x, shoulderQ.y, shoulderQ.z, shoulderQ.w);
+    } else shoulderQ.identity();
+
+    const ad = armFn(t);
+    tmp.set(ad[0], ad[1], ad[2]).normalize();
+    armQ.setFromUnitVectors(armBind, tmp);
+    armValues.push(armQ.x, armQ.y, armQ.z, armQ.w);
+
+    if(hasForeArm){
+      const fd = foreArmFn ? foreArmFn(t) : null;
+      if(fd){ tmp.set(fd[0], fd[1], fd[2]).normalize(); faQ.setFromUnitVectors(foreArmBind, tmp); }
+      else faQ.identity();
+      foreArmValues.push(faQ.x, faQ.y, faQ.z, faQ.w);
+
+      if(hasHand){
+        const pd = palmFn(t);
+        if(pd){
+          parentQ.copy(shoulderQ).multiply(armQ).multiply(faQ);
+          desired.set(pd[0], pd[1], pd[2]).normalize().applyQuaternion(parentQ.clone().invert());
+          handQ.setFromUnitVectors(down, desired);
+        } else handQ.identity();
+        handValues.push(handQ.x, handQ.y, handQ.z, handQ.w);
+      }
+    }
+  }
+
+  if(hasShoulder) tracks.push(new THREE.QuaternionKeyframeTrack(side+'Shoulder.quaternion', times.slice(), shoulderValues));
+  tracks.push(new THREE.QuaternionKeyframeTrack(side+'Arm.quaternion', times.slice(), armValues));
+  if(hasForeArm) tracks.push(new THREE.QuaternionKeyframeTrack(side+'ForeArm.quaternion', times.slice(), foreArmValues));
+  if(hasHand) tracks.push(new THREE.QuaternionKeyframeTrack(side+'Hand.quaternion', times.slice(), handValues));
+  return tracks;
+}
+
 function makeDirTrack(boneName, times, fn){
   const bindDir = armBindDir[boneName];
   if(!bonesByName[boneName] || !bindDir) return null;
@@ -2307,10 +2390,15 @@ function buildWalkClip(){
   add(makeEulerTrack('Neck',   times, function(t){ const p=ph(t); return [-1.0, -2.8*Math.cos(TAU*p), 0]; }));
   add(makeEulerTrack('Head',   times, function(t){ const p=ph(t); return [-0.5, -2.6*Math.cos(TAU*p), -1.2*Math.cos(TAU*(p-0.8))]; }));
 
-  // each arm opposes the same-side leg: left leg is forward at p=0, so the
-  // left arm is at its furthest back there
-  add(makeDirTrack('LeftArm',  times, function(t){ const p=ph(t); return [ 0.10, -0.93, -0.40*Math.cos(TAU*p)]; }));
-  add(makeDirTrack('RightArm', times, function(t){ const p=ph(t); return [-0.10, -0.93,  0.40*Math.cos(TAU*p)]; }));
+  // arms swing on the SAME asymmetric curve the legs use (scaled down),
+  // rather than a plain symmetric cosine — real arm swing isn't a mirror
+  // copy of the leg's timing, but it isn't perfectly symmetric either, and
+  // sharing one underlying shape is what makes the whole body read as a
+  // single coherent rhythm instead of two independently-clocked pendulums
+  const ARM_SCALE = 0.38, HIP_PEAK = 22;
+  function armZ(p){ return (ARM_SCALE/HIP_PEAK) * cyclicSpline(p, HIP); }
+  add(makeDirTrack('LeftArm',  times, function(t){ const p=ph(t);     return [ 0.10, -0.93, armZ(p)]; }));
+  add(makeDirTrack('RightArm', times, function(t){ const p=ph(t)+0.5; return [-0.10, -0.93, armZ(p)]; }));
   // elbow bends most as that arm swings through in front of the body
   add(makeEulerTrack('LeftForeArm',  times, function(t){ const p=ph(t); return [19 - 13*Math.cos(TAU*(p-0.10)), 0, 0]; }));
   add(makeEulerTrack('RightForeArm', times, function(t){ const p=ph(t); return [19 + 13*Math.cos(TAU*(p-0.10)), 0, 0]; }));
@@ -2347,24 +2435,30 @@ function buildWaveClip(){
 
   const hang   = [-0.07, -1, -0.045];
   const raised = [-0.80, 0.56, 0.22];   // up and clearly out to the character's right
-  add(makeDirTrack('RightArm', times, function(t){
-    const a = env(t), o = overshoot(t);
-    return [ lerp(hang[0],raised[0],a) - o, lerp(hang[1],raised[1],a) + o, lerp(hang[2],raised[2],a) ];
-  }));
+  const foreArmHang = [-0.09, -0.99, -0.05];  // natural continuation of a relaxed hanging arm
+  const wIn  = [-0.52, 0.85, 0.10];
+  const wOut = [-0.90, 0.40, 0.16];
+  const palmHang = [0, -1, 0];      // matches the assumed bind reference: no correction at rest
+  const palmRaised = [0, 0, 1];     // facing forward, toward whoever's being waved at
+
+  buildArmChainTracks(
+    'Right', times,
+    function(t){ return [0, 0, -13*env(t)]; },                      // shoulder
+    function(t){ const a=env(t), o=overshoot(t);
+      return [ lerp(hang[0],raised[0],a)-o, lerp(hang[1],raised[1],a)+o, lerp(hang[2],raised[2],a) ]; }, // arm
+    function(t){
+      const a = env(t);
+      const wiggle = 0.5 + 0.5*Math.sin(TAU*1.9*(t - raiseEnd));
+      const wig = [ lerp(wIn[0],wOut[0],wiggle), lerp(wIn[1],wOut[1],wiggle), lerp(wIn[2],wOut[2],wiggle) ];
+      return [ lerp(foreArmHang[0],wig[0],a), lerp(foreArmHang[1],wig[1],a), lerp(foreArmHang[2],wig[2],a) ];
+    },                                                                // forearm: hang -> wiggle, not straight to a wiggle extreme
+    function(t){ const a=env(t);
+      return [ lerp(palmHang[0],palmRaised[0],a), lerp(palmHang[1],palmRaised[1],a), lerp(palmHang[2],palmRaised[2],a) ]; } // palm world direction
+  ).forEach(add);
+
   add(makeDirTrack('LeftArm', times, function(t){ return [0.075, -1, -0.045 ]; }));
   add(makeEulerTrack('LeftForeArm', times, function(){ return [10,0,0]; }));
 
-  // forearm waves between two directions that both point away from the body
-  const wIn  = [-0.52, 0.85, 0.10];
-  const wOut = [-0.90, 0.40, 0.16];
-  add(makeDirTrack('RightForeArm', times, function(t){
-    const a = env(t);
-    const s = 0.5 + 0.5*Math.sin(TAU*1.9*(t - raiseEnd));
-    const f = a * s;
-    return [ lerp(wIn[0],wOut[0],f), lerp(wIn[1],wOut[1],f), lerp(wIn[2],wOut[2],f) ];
-  }));
-
-  add(makeEulerTrack('RightShoulder', times, function(t){ return [0,0, -13*env(t)]; }));
   add(makeEulerTrack('Spine1', times, function(t){ return [0, -4*env(t), -2.5*env(t)]; }));
   add(makeEulerTrack('Spine2', times, function(t){ return [0, -3*env(t), -2.0*env(t)]; }));
   add(makeEulerTrack('Neck',   times, function(t){ return [-2*env(t), 4*env(t), 0]; }));
@@ -3188,6 +3282,11 @@ document.getElementById('skeletonToggle').addEventListener('change', function(e)
 
 document.getElementById('symmetryToggle').addEventListener('change', function(e){
   symmetryEnabled = e.target.checked;
+});
+
+document.getElementById('snapToggle').addEventListener('change', function(e){
+  snapEnabled = e.target.checked;
+  log(snapEnabled ? 'Snap to grid on — joints round to the nearest ' + (rigHeightRef*0.02).toFixed(3) + ' units while dragging or nudging.' : 'Snap to grid off.');
 });
 
 document.getElementById('jointSelect').addEventListener('change', function(e){ selectJoint(e.target.value); });
