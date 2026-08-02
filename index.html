@@ -203,7 +203,12 @@
       <section class="card" id="card-upload">
         <h2><span class="num">01</span> Upload mesh</h2>
         <p class="hint">Standing upright, roughly centered. Formats: .obj, .stl, .glb, .gltf (embedded buffers only — no separate .bin/textures).</p>
-        <div class="row">
+        <div class="row" id="bodyTypeChips">
+          <button class="chip small on" data-body="humanoid">Humanoid</button>
+          <button class="chip small" data-body="quadruped">Animal (quadruped)</button>
+          <button class="chip small" data-body="bird">Bird / poultry</button>
+        </div>
+        <div class="row" style="margin-top:8px;">
           <label class="filebtn" for="fileInput">⤒ Choose file</label>
           <input type="file" id="fileInput" accept=".obj,.stl,.glb,.gltf">
           <button class="ghost small" id="sampleBtn">Use sample figure</button>
@@ -217,21 +222,23 @@
 
       <section class="card locked" id="card-rig">
         <h2><span class="num">02</span> Estimate rig</h2>
-        <p class="hint">Pick the pose your mesh is actually in — bone placement is measured from the mesh's own cross-section at each joint height. You'll get a chance to fine-tune every joint by hand next.</p>
+        <p class="hint" id="rigHint">Pick the pose your mesh is actually in — bone placement is measured from the mesh's own cross-section at each joint height. You'll get a chance to fine-tune every joint by hand next.</p>
         <div class="row" id="poseChips">
           <button class="chip small on" data-pose="a">A-Pose</button>
           <button class="chip small" data-pose="t">T-Pose</button>
         </div>
         <div class="row" style="margin-top:8px;">
           <button class="primary" id="rigBtn">Estimate skeleton</button>
-          <label class="checkline"><input type="checkbox" id="skeletonToggle" checked> show skeleton</label>
+          <button class="ghost" id="reeditBtn" disabled>✎ Edit joints again</button>
         </div>
+        <label class="checkline"><input type="checkbox" id="skeletonToggle" checked> show skeleton</label>
       </section>
 
       <section class="card locked" id="card-adjust">
         <h2><span class="num">03</span> Adjust joints</h2>
         <p class="hint">Drag any amber dot in the viewport — it moves on its own, like Mixamo's joint markers, without dragging the rest of the chain with it. Or pick a joint below and nudge it precisely.</p>
-        <div class="row">
+        <label class="checkline"><input type="checkbox" id="symmetryToggle" checked> mirror left/right while editing</label>
+        <div class="row" style="margin-top:8px;">
           <select id="jointSelect" style="flex:1 1 auto;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px;font-family:var(--mono);font-size:12px;"></select>
         </div>
         <div class="nudge-grid" id="nudgeGrid">
@@ -260,6 +267,8 @@
           <button class="chip small" data-anim="walk">Walk</button>
           <button class="chip small" data-anim="wave">Wave</button>
           <button class="chip small" data-anim="jump">Jump</button>
+          <button class="chip small" data-anim="peck" style="display:none;">Peck</button>
+          <button class="chip small" data-anim="flap" style="display:none;">Flap</button>
         </div>
         <div class="row" style="margin-top:10px;">
           <button class="small" id="playBtn">⏸ Pause</button>
@@ -332,13 +341,13 @@ function setStep(n, doneUpTo){
 function unlockCard(id){ document.getElementById(id).classList.remove('locked'); }
 
 /* ---------------------------------------------------------------------
-   1. HUMANOID SKELETON DEFINITION (heuristic, A-pose)
+   1. SKELETON DEFINITIONS (heuristic)
    x/z are fractions of the mesh's bounding-box HALF width / HALF depth.
    y is a fraction of the mesh's bounding-box HEIGHT, measured from the
-   bottom (feet). "structural" bones carry no skin weight of their own —
-   they only extend the reach / look of the skeleton visualization.
+   bottom. "structural" bones carry no skin weight of their own — they
+   only extend the reach / look of the skeleton visualization.
    --------------------------------------------------------------------- */
-const BONE_DEFS = [
+const BONE_DEFS_HUMANOID = [
   { name:'Hips',        parent:null,           y:0.500, x:0,     z:0    },
   { name:'Spine',       parent:'Hips',         y:0.580, x:0,     z:0    },
   { name:'Spine1',      parent:'Spine',        y:0.660, x:0,     z:0    },
@@ -367,18 +376,108 @@ const BONE_DEFS = [
   { name:'RightFoot',   parent:'RightLeg',     y:0.045, x:-0.16, z:0.02 },
   { name:'RightToe_End',parent:'RightFoot',    y:0.010, x:-0.16, z:0.30, structural:true },
 ];
+
+/* Quadruped (generic four-legged mammal — dog/cat/horse-ish proportions).
+   Same fraction idea, but the spine runs along Z (front-to-back length)
+   since the body is roughly horizontal instead of standing upright; y is
+   still height-from-ground, x is still left/right. Placement here is
+   plain fractions (no per-joint cross-section measurement like the
+   humanoid rig gets) — animal body plans vary too much for one fixed
+   measurement strategy, so treat this as a rougher first pass. */
+const BONE_DEFS_QUAD = [
+  { name:'Hips',        parent:null,          y:0.62, x:0,    z:0.18 },
+  { name:'Spine',       parent:'Hips',        y:0.65, x:0,    z:0.40 },
+  { name:'Spine1',      parent:'Spine',       y:0.68, x:0,    z:0.65 },
+  { name:'Neck',        parent:'Spine1',      y:0.75, x:0,    z:0.85 },
+  { name:'Head',        parent:'Neck',        y:0.80, x:0,    z:0.98 },
+  { name:'HeadTop_End', parent:'Head',        y:0.95, x:0,    z:1.05, structural:true },
+
+  { name:'FrontLeftShoulder', parent:'Spine1',            y:0.68, x:0.38, z:0.63 },
+  { name:'FrontLeftLeg',      parent:'FrontLeftShoulder', y:0.48, x:0.40, z:0.61 },
+  { name:'FrontLeftForeleg',  parent:'FrontLeftLeg',      y:0.24, x:0.40, z:0.60 },
+  { name:'FrontLeftFoot',     parent:'FrontLeftForeleg',  y:0.02, x:0.40, z:0.60 },
+  { name:'FrontLeftToe_End',  parent:'FrontLeftFoot',     y:0.00, x:0.40, z:0.68, structural:true },
+
+  { name:'FrontRightShoulder',parent:'Spine1',             y:0.68, x:-0.38, z:0.63 },
+  { name:'FrontRightLeg',     parent:'FrontRightShoulder', y:0.48, x:-0.40, z:0.61 },
+  { name:'FrontRightForeleg', parent:'FrontRightLeg',      y:0.24, x:-0.40, z:0.60 },
+  { name:'FrontRightFoot',    parent:'FrontRightForeleg',  y:0.02, x:-0.40, z:0.60 },
+  { name:'FrontRightToe_End', parent:'FrontRightFoot',     y:0.00, x:-0.40, z:0.68, structural:true },
+
+  { name:'BackLeftHip',     parent:'Hips',           y:0.65, x:0.34, z:0.16 },
+  { name:'BackLeftLeg',     parent:'BackLeftHip',    y:0.45, x:0.36, z:0.14 },
+  { name:'BackLeftForeleg', parent:'BackLeftLeg',    y:0.22, x:0.36, z:0.12 },
+  { name:'BackLeftFoot',    parent:'BackLeftForeleg',y:0.02, x:0.36, z:0.12 },
+  { name:'BackLeftToe_End', parent:'BackLeftFoot',   y:0.00, x:0.36, z:0.04, structural:true },
+
+  { name:'BackRightHip',     parent:'Hips',            y:0.65, x:-0.34, z:0.16 },
+  { name:'BackRightLeg',     parent:'BackRightHip',    y:0.45, x:-0.36, z:0.14 },
+  { name:'BackRightForeleg', parent:'BackRightLeg',    y:0.22, x:-0.36, z:0.12 },
+  { name:'BackRightFoot',    parent:'BackRightForeleg',y:0.02, x:-0.36, z:0.12 },
+  { name:'BackRightToe_End', parent:'BackRightFoot',   y:0.00, x:-0.36, z:0.04, structural:true },
+];
+
+/* Bird / poultry (chicken-, duck-, goose-like). Two structural differences
+   from the quadruped rig drive the layout: the body is an egg carried
+   almost horizontally with the legs tucked UNDER its centre of mass, and
+   the neck is a long S-curve that does most of the animal's "expression",
+   so it gets three joints rather than one. Legs are digitigrade — what
+   looks like a backward knee is really the ankle (hock), and the true knee
+   is hidden up inside the body feathers, which is why LeftLeg sits high and
+   LeftFoot (the hock) is the visible mid-leg joint. */
+const BONE_DEFS_BIRD = [
+  { name:'Hips',        parent:null,      y:0.52, x:0,    z:0.34 },
+  { name:'Spine',       parent:'Hips',    y:0.56, x:0,    z:0.50 },
+  { name:'Spine1',      parent:'Spine',   y:0.60, x:0,    z:0.64 },
+  { name:'Neck',        parent:'Spine1',  y:0.68, x:0,    z:0.72 },
+  { name:'Neck1',       parent:'Neck',    y:0.80, x:0,    z:0.76 },
+  { name:'Neck2',       parent:'Neck1',   y:0.89, x:0,    z:0.80 },
+  { name:'Head',        parent:'Neck2',   y:0.94, x:0,    z:0.85 },
+  { name:'Beak_End',    parent:'Head',    y:0.92, x:0,    z:1.00, structural:true },
+
+  { name:'Tail',        parent:'Hips',    y:0.56, x:0,    z:0.16 },
+  { name:'TailTip_End', parent:'Tail',    y:0.64, x:0,    z:0.00, structural:true },
+
+  { name:'LeftWing',        parent:'Spine1',       y:0.62, x:0.20, z:0.60 },
+  { name:'LeftWingForearm', parent:'LeftWing',     y:0.58, x:0.42, z:0.50 },
+  { name:'LeftWingHand',    parent:'LeftWingForearm', y:0.55, x:0.62, z:0.36 },
+  { name:'LeftWingTip_End', parent:'LeftWingHand', y:0.52, x:0.80, z:0.18, structural:true },
+
+  { name:'RightWing',        parent:'Spine1',        y:0.62, x:-0.20, z:0.60 },
+  { name:'RightWingForearm', parent:'RightWing',     y:0.58, x:-0.42, z:0.50 },
+  { name:'RightWingHand',    parent:'RightWingForearm', y:0.55, x:-0.62, z:0.36 },
+  { name:'RightWingTip_End', parent:'RightWingHand', y:0.52, x:-0.80, z:0.18, structural:true },
+
+  { name:'LeftUpLeg',   parent:'Hips',       y:0.46, x:0.16, z:0.36 },
+  { name:'LeftLeg',     parent:'LeftUpLeg',  y:0.34, x:0.17, z:0.30 },
+  { name:'LeftFoot',    parent:'LeftLeg',    y:0.16, x:0.17, z:0.36 },
+  { name:'LeftToe',     parent:'LeftFoot',   y:0.02, x:0.17, z:0.34 },
+  { name:'LeftToe_End', parent:'LeftToe',    y:0.00, x:0.17, z:0.50, structural:true },
+
+  { name:'RightUpLeg',   parent:'Hips',        y:0.46, x:-0.16, z:0.36 },
+  { name:'RightLeg',     parent:'RightUpLeg',  y:0.34, x:-0.17, z:0.30 },
+  { name:'RightFoot',    parent:'RightLeg',    y:0.16, x:-0.17, z:0.36 },
+  { name:'RightToe',     parent:'RightFoot',   y:0.02, x:-0.17, z:0.34 },
+  { name:'RightToe_End', parent:'RightToe',    y:0.00, x:-0.17, z:0.50, structural:true },
+];
+
 // T-pose height fractions for the arm chain (nearly flat — a real T-pose arm
 // is roughly horizontal, so shoulder/elbow/wrist sit at almost the same Y,
 // unlike A-pose where they descend). x/z above are reused as reach RATIOS
-// in T-pose mode (see computeBonePositions), not absolute fractions.
+// in T-pose mode (see computeBonePositionsHumanoid), not absolute fractions.
 const ARM_T_POSE_Y = {
   LeftShoulder:0.775, LeftArm:0.765, LeftForeArm:0.755, LeftHand:0.745,
   RightShoulder:0.775, RightArm:0.765, RightForeArm:0.755, RightHand:0.745,
 };
-let poseMode = 'a'; // 'a' = A-pose, 't' = T-pose — set via the pose toggle chips
+let poseMode = 'a';       // 'a' = A-pose, 't' = T-pose — humanoid only
+let bodyType = 'humanoid'; // 'humanoid' | 'quadruped' — set via the body-type chips
+let activeBoneDefs = BONE_DEFS_HUMANOID; // whichever defs were used for the current rig
+
 // Every parent→child pair is a skinning "segment", weight-attributed to the PARENT bone.
-const SEGMENTS = BONE_DEFS.filter(function(b){ return b.parent; })
-  .map(function(b){ return { bone:b.parent, from:b.parent, to:b.name }; });
+function segmentsFromDefs(defs){
+  return defs.filter(function(b){ return b.parent; })
+    .map(function(b){ return { bone:b.parent, from:b.parent, to:b.name }; });
+}
 
 /* ---------------------------------------------------------------------
    2. THREE.JS SCENE SETUP
@@ -525,6 +624,11 @@ updateCamera();
 function fitCameraToHeight(height){
   camTarget.set(0, height * 0.5, 0);
   camRadius = Math.max(1.6, height * 1.9);
+  updateCamera();
+}
+function setFrontIsometricView(){
+  camTheta = 0;               // facing straight at +Z ("front")
+  camPhi = Math.PI * 0.32;    // slight elevation, classic isometric-ish tilt
   updateCamera();
 }
 
@@ -848,6 +952,59 @@ function buildSampleFigure(){
   return mergeGeometries(parts);
 }
 
+function buildSampleQuadruped(){
+  const parts = [];
+  function addPart(geo, x,y,z, rx,ry,rz){
+    geo = geo.toNonIndexed();
+    geo.applyMatrix4(new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(rx||0, ry||0, rz||0)));
+    geo.applyMatrix4(new THREE.Matrix4().makeTranslation(x,y,z));
+    parts.push(geo);
+  }
+  // body (lying along Z), chest, head, snout, ears
+  addPart(new THREE.CylinderGeometry(0.22,0.24,0.75,14), 0,0.50,0.40, Math.PI/2,0,0);
+  addPart(new THREE.SphereGeometry(0.23,12,10), 0,0.52,0.78);
+  addPart(new THREE.SphereGeometry(0.15,12,10), 0,0.62,1.05);
+  addPart(new THREE.CylinderGeometry(0.08,0.10,0.18,10), 0,0.58,1.20, Math.PI/2,0,0);
+  addPart(new THREE.ConeGeometry(0.06,0.14,8), 0.09,0.78,1.0);
+  addPart(new THREE.ConeGeometry(0.06,0.14,8), -0.09,0.78,1.0);
+  // front legs
+  addPart(new THREE.CylinderGeometry(0.055,0.045,0.5,8), 0.16,0.25,0.65);
+  addPart(new THREE.CylinderGeometry(0.055,0.045,0.5,8), -0.16,0.25,0.65);
+  // back legs
+  addPart(new THREE.CylinderGeometry(0.06,0.05,0.5,8), 0.16,0.25,0.10);
+  addPart(new THREE.CylinderGeometry(0.06,0.05,0.5,8), -0.16,0.25,0.10);
+  return mergeGeometries(parts);
+}
+
+function buildSampleBird(){
+  const parts = [];
+  function addPart(geo, x,y,z, rx,ry,rz, sx,sy,sz){
+    geo = geo.toNonIndexed();
+    if(sx !== undefined) geo.applyMatrix4(new THREE.Matrix4().makeScale(sx,sy,sz));
+    geo.applyMatrix4(new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(rx||0, ry||0, rz||0)));
+    geo.applyMatrix4(new THREE.Matrix4().makeTranslation(x,y,z));
+    parts.push(geo);
+  }
+  // egg-shaped body carried horizontally, tail, S-curved neck, head, beak, comb
+  addPart(new THREE.SphereGeometry(0.30,16,12), 0,0.62,0.45, 0,0,0, 1.0,0.92,1.25);
+  addPart(new THREE.ConeGeometry(0.16,0.34,10), 0,0.74,0.10, -0.9,0,0);
+  addPart(new THREE.CylinderGeometry(0.10,0.13,0.26,10), 0,0.82,0.66, 0.5,0,0);
+  addPart(new THREE.CylinderGeometry(0.085,0.10,0.22,10), 0,0.98,0.74, 0.15,0,0);
+  addPart(new THREE.SphereGeometry(0.115,12,10), 0,1.10,0.79);
+  addPart(new THREE.ConeGeometry(0.05,0.15,8), 0,1.08,0.91, 1.4,0,0);
+  addPart(new THREE.BoxGeometry(0.02,0.07,0.13), 0,1.20,0.78);
+  // folded wings flattened against the flanks
+  addPart(new THREE.SphereGeometry(0.15,10,8), 0.26,0.66,0.45, 0,0,0, 0.5,0.9,1.5);
+  addPart(new THREE.SphereGeometry(0.15,10,8), -0.26,0.66,0.45, 0,0,0, 0.5,0.9,1.5);
+  // legs: thigh tucked high into the body, shank, then foot
+  [0.12,-0.12].forEach(function(sx){
+    addPart(new THREE.CylinderGeometry(0.045,0.04,0.22,8), sx,0.34,0.40);
+    addPart(new THREE.CylinderGeometry(0.028,0.025,0.24,8), sx,0.14,0.40);
+    addPart(new THREE.BoxGeometry(0.07,0.035,0.20), sx,0.02,0.46);
+  });
+  return mergeGeometries(parts);
+}
+
 /* ---------------------------------------------------------------------
    4. LOAD MESH → PREVIEW
    --------------------------------------------------------------------- */
@@ -938,6 +1095,63 @@ function disposeRig(){
   document.getElementById('card-adjust').classList.add('locked');
   document.getElementById('card-anim').classList.add('locked');
   document.getElementById('card-export').classList.add('locked');
+  document.getElementById('reeditBtn').disabled = true;
+}
+
+/* Re-enter joint-adjust mode after a mesh has already been skinned, keeping
+   whatever positions it currently has (rather than re-measuring from
+   scratch) — the geometry itself is NOT disposed since the same buffers get
+   reused once the user re-confirms. */
+function reopenForEditing(){
+  if(!skinnedMesh) return;
+  if(currentAction){ currentAction.stop(); currentAction = null; }
+  // NOTE: deliberately NOT calling resetBonesToRest() here — that applies the
+  // animation-only hang-down correction to the arms, which would visibly
+  // rotate them away from whatever pose (A/T/manual) they were actually
+  // rigged in. The joint editor should always show the true rest pose:
+  // original positions, identity rotation on every bone.
+  for(const name in bonesByName){
+    const b = bonesByName[name];
+    if(restLocalPositions[name]) b.position.copy(restLocalPositions[name]);
+    b.quaternion.identity();
+  }
+
+  const rootBone = bonesByName['Hips'];
+  skinnedMesh.remove(rootBone);
+  scene.remove(skinnedMesh);
+  skinnedMesh = null;
+  skeleton = null;
+  mixer = null;
+  allClips = [];
+  document.querySelectorAll('#animChips .chip[data-anim^="bvh_"]').forEach(function(b){ b.remove(); });
+  if(skeletonHelper){ scene.remove(skeletonHelper); skeletonHelper = null; }
+
+  previewRigRoot = new THREE.Group();
+  previewRigRoot.add(rootBone);
+  scene.add(previewRigRoot);
+  previewRigRoot.updateMatrixWorld(true);
+
+  skeletonHelper = new THREE.SkeletonHelper(previewRigRoot);
+  skeletonHelper.material.linewidth = 2;
+  scene.add(skeletonHelper);
+  skeletonHelper.visible = document.getElementById('skeletonToggle').checked;
+
+  const boneList = [];
+  previewRigRoot.traverse(function(o){ if(o.isBone) boneList.push(o); });
+  jointHandles = createJointHandles(boneList);
+  scene.add(jointHandles);
+  populateJointSelect(boneList);
+  selectJoint('Hips');
+
+  currentPreviewMesh = new THREE.Mesh(currentGeometry, previewMaterial);
+  scene.add(currentPreviewMesh);
+
+  document.getElementById('card-anim').classList.add('locked');
+  document.getElementById('card-export').classList.add('locked');
+  unlockCard('card-adjust');
+  setStep(3);
+  setFrontIsometricView();
+  log('Back in joint-adjust mode with your previously confirmed positions. Tweak and tap <b>Confirm &amp; skin mesh</b> again when ready.');
 }
 
 /* ---- joint marker handles: create, sync, select, move, nudge --------- */
@@ -978,7 +1192,13 @@ function selectJoint(boneName){
   const sel = document.getElementById('jointSelect');
   if(sel && sel.value !== boneName) sel.value = boneName;
 }
-function moveJointTo(boneName, worldPoint){
+let symmetryEnabled = true;
+function getMirrorBoneName(name){
+  if(name.indexOf('Left') >= 0) return name.replace('Left', 'Right');
+  if(name.indexOf('Right') >= 0) return name.replace('Right', 'Left');
+  return null;
+}
+function moveJointTo(boneName, worldPoint, skipMirror){
   const bone = bonesByName[boneName];
   if(!bone || !bone.parent) return;
 
@@ -1005,6 +1225,15 @@ function moveJointTo(boneName, worldPoint){
   });
 
   refreshJointHandles();
+
+  if(!skipMirror && symmetryEnabled){
+    const mirrorName = getMirrorBoneName(boneName);
+    if(mirrorName && bonesByName[mirrorName]){
+      const mirrored = worldPoint.clone();
+      mirrored.x = -mirrored.x;
+      moveJointTo(mirrorName, mirrored, true);
+    }
+  }
 }
 function nudgeSelectedJoint(axis, sign){
   if(!selectedJointName) return;
@@ -1037,7 +1266,9 @@ function loadMeshFromGeometry(geometry, label){
 
   let bbox = normalizeGeometry(geometry);
 
-  if(document.getElementById('autoFaceToggle').checked){
+  if(bodyType === 'quadruped' || bodyType === 'bird'){
+    log('Auto-face skipped for animal meshes — make sure it already faces +Z (head away from the default camera) and stands on its feet.');
+  } else if(document.getElementById('autoFaceToggle').checked){
     const status = autoOrient(geometry);
     bbox = normalizeGeometry(geometry); // re-center/re-floor after any rotation
     log('Auto-face: ' + status);
@@ -1068,107 +1299,327 @@ function loadMeshFromGeometry(geometry, label){
 
 /* ---------------------------------------------------------------------
    5. SKELETON GENERATION
+
+   Joint placement works by finding real anatomical landmarks in the mesh
+   rather than assuming fixed height fractions:
+     • neck    → narrowest cross-section of the central column near the top
+     • armpit  → where the silhouette suddenly widens (arms attach)
+     • crotch  → lowest Y at which left and right leg clusters merge
+     • ankle   → where the foot's forward (Z) extent grows sharply
+   Each limb's centerline is then traced through the mesh, and joints are
+   placed at anthropometric fractions ALONG that measured centerline, so
+   elbows/knees/wrists land inside the limb even when a character's
+   proportions are far from average. Fractions used (share of limb length):
+   elbow 42%, wrist 76% of shoulder→fingertip; knee 50% of hip→ankle —
+   these come from standard body-segment proportions.
    --------------------------------------------------------------------- */
-function computeBonePositions(geometry, bbox, pose){
+function analyzeHumanoidLandmarks(geometry, bbox){
+  const posAttr = geometry.attributes.position;
+  const H = (bbox.max.y - bbox.min.y) || 1;
+  const y0 = bbox.min.y;
+  const NY = 160, NX = 40;
+
+  const bins = [];
+  for(let i=0;i<NY;i++){
+    bins.push({ count:0, minX:Infinity, maxX:-Infinity, minZ:Infinity, maxZ:-Infinity,
+                lc:0, lsx:0, lsz:0, rc:0, rsx:0, rsz:0, xh:new Int32Array(NX) });
+  }
+  const cxRough = (bbox.max.x + bbox.min.x)/2;
+  const halfW = ((bbox.max.x - bbox.min.x)/2) || 1;
+
+  for(let i=0;i<posAttr.count;i++){
+    const y = posAttr.getY(i), x = posAttr.getX(i), z = posAttr.getZ(i);
+    let bi = Math.floor(((y - y0)/H) * NY);
+    if(bi < 0) bi = 0; if(bi >= NY) bi = NY-1;
+    const b = bins[bi];
+    b.count++;
+    if(x < b.minX) b.minX = x;
+    if(x > b.maxX) b.maxX = x;
+    if(z < b.minZ) b.minZ = z;
+    if(z > b.maxZ) b.maxZ = z;
+    if(x >= cxRough){ b.lc++; b.lsx += x; b.lsz += z; }
+    else { b.rc++; b.rsx += x; b.rsz += z; }
+    let xi = Math.floor(((x - bbox.min.x)/(halfW*2 || 1)) * NX);
+    if(xi < 0) xi = 0; if(xi >= NX) xi = NX-1;
+    b.xh[xi]++;
+  }
+
+  function width(i){ return bins[i].count ? (bins[i].maxX - bins[i].minX) : 0; }
+  function depth(i){ return bins[i].count ? (bins[i].maxZ - bins[i].minZ) : 0; }
+  function yOf(i){ return y0 + (i + 0.5) * H / NY; }
+  function fracOf(i){ return (i + 0.5) / NY; }
+
+  const median = (function(){
+    const w = [];
+    for(let i=0;i<NY;i++) if(bins[i].count > 0) w.push(width(i));
+    w.sort(function(a,b){return a-b;});
+    return w.length ? w[Math.floor(w.length/2)] : halfW*2;
+  })();
+
+  // --- NECK: narrowest slice in the upper region (head sits above it) ---
+  let neckI = null, neckW = Infinity;
+  for(let i=Math.floor(NY*0.70); i<Math.floor(NY*0.95); i++){
+    if(!bins[i].count) continue;
+    if(width(i) < neckW){ neckW = width(i); neckI = i; }
+  }
+
+  // --- ARMPIT / SHOULDER: scanning down from the neck, the first slice
+  // where the silhouette widens well beyond the torso is where arms begin.
+  let shoulderI = null;
+  if(neckI !== null){
+    const torsoRef = median;
+    for(let i=neckI; i>Math.floor(NY*0.45); i--){
+      if(!bins[i].count) continue;
+      if(width(i) > torsoRef * 1.25){ shoulderI = i; break; }
+    }
+  }
+
+  // --- CROTCH: scanning up from the floor, the highest slice where the
+  // left and right leg clusters are still separated by an empty gap.
+  let crotchI = null;
+  for(let i=Math.floor(NY*0.10); i<Math.floor(NY*0.62); i++){
+    const b = bins[i];
+    if(!b.count) continue;
+    let gap = false, runStart = -1;
+    for(let k=0;k<NX;k++){
+      if(b.xh[k] === 0){ if(runStart < 0) runStart = k; }
+      else {
+        if(runStart > 0 && k < NX-1 && (k - runStart) >= 2) gap = true;
+        runStart = -1;
+      }
+    }
+    if(gap) crotchI = i;
+  }
+
+  // --- ANKLE: scanning up from the floor, where the foot's forward extent
+  // (Z depth) drops back toward the leg's own thickness.
+  let ankleI = null;
+  {
+    let footDepth = 0;
+    const base = Math.floor(NY*0.01);
+    for(let i=base; i<Math.floor(NY*0.08); i++) footDepth = Math.max(footDepth, depth(i));
+    for(let i=Math.floor(NY*0.02); i<Math.floor(NY*0.30); i++){
+      if(!bins[i].count) continue;
+      if(depth(i) < footDepth * 0.62){ ankleI = i; break; }
+    }
+  }
+
+  return {
+    bins:bins, NY:NY, NX:NX, H:H, y0:y0, median:median,
+    width:width, depth:depth, yOf:yOf, fracOf:fracOf,
+    neckFrac:   neckI     !== null ? fracOf(neckI)     : null,
+    shoulderFrac: shoulderI !== null ? fracOf(shoulderI) : null,
+    crotchFrac: crotchI   !== null ? fracOf(crotchI)   : null,
+    ankleFrac:  ankleI    !== null ? fracOf(ankleI)    : null,
+  };
+}
+
+function computeBonePositionsHumanoid(geometry, bbox, pose){
+  const posAttr = geometry.attributes.position;
   const H = (bbox.max.y - bbox.min.y) || 1;
   const halfW = ((bbox.max.x - bbox.min.x) / 2) || 1;
   const halfD = ((bbox.max.z - bbox.min.z) / 2) || 1;
   const cx = (bbox.max.x + bbox.min.x) / 2;
   const cz = (bbox.max.z + bbox.min.z) / 2;
-  const posAttr = geometry.attributes.position;
 
-  // mean X/Z of every point within a thin band at yFrac — used to center the torso chain
-  function sliceCentroid(yFrac){
+  const LM = analyzeHumanoidLandmarks(geometry, bbox);
+  const neckF     = LM.neckFrac     !== null ? LM.neckFrac     : 0.855;
+  const shoulderF = LM.shoulderFrac !== null ? LM.shoulderFrac : 0.795;
+  const crotchF   = LM.crotchFrac   !== null ? LM.crotchFrac   : 0.480;
+  const ankleF    = LM.ankleFrac    !== null ? LM.ankleFrac    : 0.045;
+
+  // mean X/Z of every point in a thin band at yFrac (optionally limited to
+  // the central column, so flung-out arms can't drag the torso off-center)
+  function sliceCentroid(yFrac, centralOnly){
     const yC = bbox.min.y + yFrac*H, band = Math.max(0.02*H, 0.015);
+    const lim = LM.median * 0.55;
     let sx=0, sz=0, c=0;
     for(let i=0; i<posAttr.count; i++){
       if(Math.abs(posAttr.getY(i)-yC) > band) continue;
-      sx += posAttr.getX(i); sz += posAttr.getZ(i); c++;
+      const x = posAttr.getX(i);
+      if(centralOnly && Math.abs(x - cx) > lim) continue;
+      sx += x; sz += posAttr.getZ(i); c++;
     }
     return c>0 ? {x:sx/c, z:sz/c} : null;
   }
-  // farthest point on the given side at yFrac — used per-joint for A-pose arms
-  function sideExtent(yFrac, side){
+  // centroid of ONE leg at yFrac (points on the given side of the body axis)
+  function legCentroid(yFrac, side){
     const yC = bbox.min.y + yFrac*H, band = Math.max(0.025*H, 0.02);
-    let best = null;
+    let sx=0, sz=0, c=0;
     for(let i=0; i<posAttr.count; i++){
       if(Math.abs(posAttr.getY(i)-yC) > band) continue;
       const x = posAttr.getX(i);
-      if(side>0 && x>0 && (best===null || x>best)) best = x;
-      if(side<0 && x<0 && (best===null || x<best)) best = x;
+      if((side>0 && x <= cx) || (side<0 && x >= cx)) continue;
+      sx += x; sz += posAttr.getZ(i); c++;
+    }
+    return c>0 ? {x:sx/c, z:sz/c} : null;
+  }
+  // centroid of a vertical X-slab of the arm (T-pose: arms run along X)
+  function armSlabCentroidByX(xC, side){
+    const band = halfW * 0.045;
+    let sy=0, sz=0, c=0;
+    for(let i=0; i<posAttr.count; i++){
+      const x = posAttr.getX(i);
+      if(Math.abs(x - xC) > band) continue;
+      if((side>0 && x <= cx) || (side<0 && x >= cx)) continue;
+      const yf = (posAttr.getY(i) - bbox.min.y)/H;
+      if(yf < shoulderF - 0.14 || yf > shoulderF + 0.10) continue;
+      sy += posAttr.getY(i); sz += posAttr.getZ(i); c++;
+    }
+    return c>0 ? {y:sy/c, z:sz/c} : null;
+  }
+  // centroid of the ARM cluster at yFrac — points beyond the torso silhouette
+  function armClusterByY(yFrac, side){
+    const yC = bbox.min.y + yFrac*H, band = Math.max(0.03*H, 0.022);
+    const torsoLim = LM.median * 0.52;
+    let sx=0, sz=0, c=0;
+    for(let i=0; i<posAttr.count; i++){
+      if(Math.abs(posAttr.getY(i)-yC) > band) continue;
+      const x = posAttr.getX(i);
+      if(Math.abs(x - cx) < torsoLim) continue;
+      if((side>0 && x <= cx) || (side<0 && x >= cx)) continue;
+      sx += x; sz += posAttr.getZ(i); c++;
+    }
+    return c>0 ? {x:sx/c, z:sz/c} : null;
+  }
+  function extremeX(side){
+    let best = null;
+    for(let i=0; i<posAttr.count; i++){
+      const yf = (posAttr.getY(i) - bbox.min.y)/H;
+      if(yf < shoulderF - 0.30 || yf > shoulderF + 0.12) continue;
+      const x = posAttr.getX(i);
+      if(side>0 && (best===null || x>best)) best = x;
+      if(side<0 && (best===null || x<best)) best = x;
     }
     return best;
   }
-  // mean X of the given side's cluster at yFrac — used for legs (both poses)
-  function sideMean(yFrac, side){
-    const yC = bbox.min.y + yFrac*H, band = Math.max(0.03*H, 0.02);
-    let s=0, c=0;
-    for(let i=0; i<posAttr.count; i++){
-      if(Math.abs(posAttr.getY(i)-yC) > band) continue;
-      const x = posAttr.getX(i);
-      if((side>0 && x>0) || (side<0 && x<0)){ s += x; c++; }
-    }
-    return c>0 ? s/c : null;
-  }
 
-  // T-pose: joints are roughly co-planar in Y, so measure ONE overall
-  // left/right reach across the whole shoulder band and place joints
-  // proportionally along it instead of per-joint (which can't distinguish
-  // shoulder/elbow/hand when they all sit at nearly the same height).
-  let reach = null;
-  if(pose === 't'){
-    let bestL=null, bestR=null;
-    for(let i=0; i<posAttr.count; i++){
-      const yf = (posAttr.getY(i)-bbox.min.y)/H;
-      if(yf < 0.66 || yf > 0.86) continue;
-      const x = posAttr.getX(i);
-      if(x>0 && (bestL===null || x>bestL)) bestL = x;
-      if(x<0 && (bestR===null || x<bestR)) bestR = x;
-    }
-    reach = { left:bestL, right:bestR };
-  }
-
-  const TORSO = { Hips:1, Spine:1, Spine1:1, Spine2:1, Neck:1, Head:1, HeadTop_End:1 };
   const pos = {};
-  for(const def of BONE_DEFS){
-    let x = cx + def.x*halfW;
-    let z = cz + def.z*halfD;
-    const isArm = ARM_T_POSE_Y.hasOwnProperty(def.name);
-    const yFrac = (isArm && pose === 't') ? ARM_T_POSE_Y[def.name] : def.y;
-    let y = bbox.min.y + yFrac*H;
-    const side = def.name.indexOf('Left') === 0 ? 1 : (def.name.indexOf('Right') === 0 ? -1 : 0);
+  function set(name, x, y, z){ pos[name] = new THREE.Vector3(x, y, z); }
 
-    if(TORSO[def.name]){
-      const c = sliceCentroid(def.y);
-      if(c){ x = c.x; z = c.z; }
-    } else if(side !== 0 && /UpLeg|Leg|Foot|Toe/.test(def.name)){
-      const m = sideMean(def.y, side);
-      if(m !== null) x = m;
-    } else if(isArm && side !== 0){
-      if(pose === 'a'){
-        const e = sideExtent(def.y, side);
-        if(e !== null) x = e;
-      } else if(reach){
-        const r = side>0 ? reach.left : reach.right;
-        if(r !== null) x = r * Math.abs(def.x); // def.x already encodes the reach ratio; r carries the correct sign
-      }
+  /* ---------- torso chain, spaced between the measured crotch and neck ---- */
+  const hipsF   = crotchF + (shoulderF - crotchF) * 0.06;
+  const chainF  = {
+    Hips:   hipsF,
+    Spine:  crotchF + (shoulderF - crotchF) * 0.28,
+    Spine1: crotchF + (shoulderF - crotchF) * 0.56,
+    Spine2: crotchF + (shoulderF - crotchF) * 0.86,
+    Neck:   neckF,
+    Head:   neckF + (1 - neckF) * 0.35,
+    HeadTop_End: 0.995,
+  };
+  for(const name in chainF){
+    const f = chainF[name];
+    const c = sliceCentroid(f, true);
+    set(name, c ? c.x : cx, bbox.min.y + f*H, c ? c.z : cz);
+  }
+
+  /* ---------- legs: trace each leg's own centerline ---------- */
+  const kneeF = ankleF + (hipsF - ankleF) * 0.50;   // knee sits midway hip→ankle
+  const toeF  = Math.max(0.004, ankleF * 0.22);
+  [['Left',1],['Right',-1]].forEach(function(pair){
+    const side = pair[0], s = pair[1];
+    const hip   = legCentroid(crotchF + 0.015, s) || {x: cx + s*halfW*0.16, z: cz};
+    const knee  = legCentroid(kneeF, s)           || {x: cx + s*halfW*0.16, z: cz};
+    const ankle = legCentroid(ankleF, s)          || {x: cx + s*halfW*0.16, z: cz};
+    set(side+'UpLeg', hip.x,   bbox.min.y + hipsF*H,   hip.z);
+    set(side+'Leg',   knee.x,  bbox.min.y + kneeF*H,   knee.z);
+    set(side+'Foot',  ankle.x, bbox.min.y + ankleF*H,  ankle.z);
+    // toe tip: front of the foot's own footprint
+    let maxZ = -Infinity, c = 0;
+    const yTop = bbox.min.y + ankleF*H;
+    for(let i=0; i<posAttr.count; i++){
+      const y = posAttr.getY(i);
+      if(y > yTop) continue;
+      const x = posAttr.getX(i);
+      if((s>0 && x <= cx) || (s<0 && x >= cx)) continue;
+      const z = posAttr.getZ(i);
+      if(z > maxZ){ maxZ = z; c = 1; }
     }
-    pos[def.name] = new THREE.Vector3(x, y, z);
+    set(side+'Toe_End', ankle.x, bbox.min.y + toeF*H, c ? maxZ : ankle.z + halfD*0.3);
+  });
+
+  /* ---------- arms: trace the centerline, then split at real fractions ---- */
+  const shoulderY = bbox.min.y + shoulderF*H;
+  [['Left',1],['Right',-1]].forEach(function(pair){
+    const side = pair[0], s = pair[1];
+    const tip = extremeX(s);
+    const torsoEdge = cx + s * LM.median * 0.5;
+    const clav = sliceCentroid(shoulderF, true) || {x:cx, z:cz};
+
+    if(pose === 't' && tip !== null){
+      // T-pose: arm runs along X, so walk outward in X and read the
+      // cross-section's centre height/depth at each step.
+      const reach = tip - torsoEdge;
+      function at(f){
+        const xq = torsoEdge + reach * f;
+        const c = armSlabCentroidByX(xq, s);
+        return { x: xq, y: c ? c.y : shoulderY, z: c ? c.z : cz };
+      }
+      const sh = at(0.06), el = at(0.42), wr = at(0.76);
+      set(side+'Shoulder', clav.x + s*LM.median*0.18, shoulderY, clav.z);
+      set(side+'Arm',      sh.x, sh.y, sh.z);
+      set(side+'ForeArm',  el.x, el.y, el.z);
+      set(side+'Hand',     wr.x, wr.y, wr.z);
+    } else {
+      // A-pose: arm descends diagonally, so step DOWN in Y and take the
+      // centroid of whatever lies outside the torso silhouette.
+      const lowF = Math.max(crotchF, shoulderF - 0.42);
+      function at(f){
+        const yf = shoulderF + (lowF - shoulderF) * f;
+        const c = armClusterByY(yf, s);
+        return { x: c ? c.x : cx + s*halfW*(0.3 + 0.6*f), y: bbox.min.y + yf*H, z: c ? c.z : cz };
+      }
+      const sh = at(0.05), el = at(0.45), wr = at(0.82);
+      set(side+'Shoulder', clav.x + s*LM.median*0.18, shoulderY, clav.z);
+      set(side+'Arm',      sh.x, sh.y, sh.z);
+      set(side+'ForeArm',  el.x, el.y, el.z);
+      set(side+'Hand',     wr.x, wr.y, wr.z);
+    }
+  });
+
+  // Safety net: anything the measurements couldn't produce falls back to the
+  // original fixed-fraction placement, so a weird mesh still yields a rig.
+  for(const def of BONE_DEFS_HUMANOID){
+    if(!pos[def.name] || !isFinite(pos[def.name].x) || !isFinite(pos[def.name].y) || !isFinite(pos[def.name].z)){
+      pos[def.name] = new THREE.Vector3(cx + def.x*halfW, bbox.min.y + def.y*H, cz + def.z*halfD);
+    }
   }
   return pos;
 }
 
-function buildBoneHierarchy(bonePositions){
+/* Non-humanoid placement — plain fractions of the bounding box, shared by
+   the quadruped and bird rigs (see BONE_DEFS_QUAD comment for why these
+   skip the per-joint measurement the humanoid rig uses). Left/right pairs
+   still mirror automatically since the defs already encode +x for one side
+   and -x for the other, same idea as the humanoid rig. */
+function computeBonePositionsFractional(geometry, bbox, defs){
+  const H = (bbox.max.y - bbox.min.y) || 1;
+  const L = (bbox.max.z - bbox.min.z) || 1;
+  const halfW = ((bbox.max.x - bbox.min.x) / 2) || 1;
+  const cx = (bbox.max.x + bbox.min.x) / 2;
+  const pos = {};
+  for(const def of defs){
+    pos[def.name] = new THREE.Vector3(
+      cx + def.x * halfW,
+      bbox.min.y + def.y * H,
+      bbox.min.z + def.z * L
+    );
+  }
+  return pos;
+}
+
+function buildBoneHierarchy(bonePositions, defs){
   const bonesByName_ = {};
   const boneList = [];
-  for(const def of BONE_DEFS){
+  for(const def of defs){
     const bone = new THREE.Bone();
     bone.name = def.name;
     boneList.push(bone);
     bonesByName_[def.name] = bone;
     if(def.parent) bonesByName_[def.parent].add(bone);
   }
-  for(const def of BONE_DEFS){
+  for(const def of defs){
     const world = bonePositions[def.name];
     const parentWorld = def.parent ? bonePositions[def.parent] : new THREE.Vector3(0,0,0);
     bonesByName_[def.name].position.copy(world.clone().sub(parentWorld));
@@ -1177,13 +1628,13 @@ function buildBoneHierarchy(bonePositions){
 }
 
 /* ---- async, chunked skin-weight computation (keeps mobile UI responsive) */
-function computeSkinningAsync(geometry, bonePositions, boneNameToIndex, onProgress){
+function computeSkinningAsync(geometry, bonePositions, boneNameToIndex, segments, onProgress){
   return new Promise(function(resolve){
     const posAttr = geometry.attributes.position;
     const vertCount = posAttr.count;
     const skinIndices = new Float32Array(vertCount*4);
     const skinWeights = new Float32Array(vertCount*4);
-    const segs = SEGMENTS.map(function(s){
+    const segs = segments.map(function(s){
       return { idx: boneNameToIndex[s.bone], a: bonePositions[s.from].clone(), b: bonePositions[s.to].clone() };
     });
     const K = 4;
@@ -1231,14 +1682,22 @@ function estimateRig(){
   const rigBtn = document.getElementById('rigBtn');
   rigBtn.disabled = true;
   try{
-    log('Analyzing mesh cross-sections and placing 23 bones (' + (poseMode==='a'?'A-pose':'T-pose') + ' mode)…');
+    activeBoneDefs = bodyType === 'quadruped' ? BONE_DEFS_QUAD
+                   : bodyType === 'bird'      ? BONE_DEFS_BIRD
+                   : BONE_DEFS_HUMANOID;
+    log('Analyzing mesh and placing ' + activeBoneDefs.length + ' bones (' +
+        (bodyType === 'quadruped' ? 'quadruped' :
+         bodyType === 'bird'      ? 'bird' :
+         (poseMode==='a'?'A-pose':'T-pose')) + ' mode)…');
     disposeRig(); // clear any previous handles/skeleton before building the new one
 
     currentGeometry.computeBoundingBox();
     const bbox = currentGeometry.boundingBox;
     rigHeightRef = (bbox.max.y - bbox.min.y) || 1;
-    const bonePositions = computeBonePositions(currentGeometry, bbox, poseMode);
-    const built = buildBoneHierarchy(bonePositions);
+    const bonePositions = (bodyType === 'quadruped' || bodyType === 'bird')
+      ? computeBonePositionsFractional(currentGeometry, bbox, activeBoneDefs)
+      : computeBonePositionsHumanoid(currentGeometry, bbox, poseMode);
+    const built = buildBoneHierarchy(bonePositions, activeBoneDefs);
     bonesByName = built.bonesByName;
 
     previewRigRoot = new THREE.Group();
@@ -1259,6 +1718,7 @@ function estimateRig(){
     document.getElementById('statBones').textContent = String(built.boneList.length);
     unlockCard('card-adjust');
     setStep(3);
+    setFrontIsometricView();
     log('Estimated <b>' + built.boneList.length + ' joints</b>. Drag the amber dots in the viewport, or use the dropdown + nudge buttons, then tap <b>Confirm &amp; skin mesh</b>.');
   } catch(err){
     console.error(err);
@@ -1283,7 +1743,7 @@ async function confirmRig(){
     boneList.forEach(function(b){ b.getWorldPosition(wp); bonePositions[b.name] = wp.clone(); });
 
     log('Computing skin weights from final joint placement (nearest-bone blend, up to 4 influences/vertex)…');
-    await computeSkinningAsync(currentGeometry, bonePositions, boneNameToIndex, function(done, total){
+    await computeSkinningAsync(currentGeometry, bonePositions, boneNameToIndex, segmentsFromDefs(activeBoneDefs), function(done, total){
       if(total > 20000 && done < total){ log('  … ' + done.toLocaleString() + ' / ' + total.toLocaleString() + ' vertices'); }
     });
 
@@ -1313,12 +1773,19 @@ async function confirmRig(){
     computeRestPose();
     buildAllClips();
     mixer = new THREE.AnimationMixer(skinnedMesh);
+    document.querySelectorAll('#animChips .chip[data-anim]').forEach(function(btn){
+      const a = btn.dataset.anim;
+      if(a === 'idle' || a === 'walk' || a.indexOf('bvh_') === 0){ btn.style.display = ''; return; }
+      const birdOnly = (a === 'peck' || a === 'flap');
+      btn.style.display = (bodyType === 'bird') === birdOnly && bodyType !== 'quadruped' ? '' : 'none';
+    });
     playAnimation('idle');
 
     document.getElementById('card-adjust').classList.add('locked');
     unlockCard('card-anim');
     unlockCard('card-export');
     setStep(5);
+    document.getElementById('reeditBtn').disabled = false;
     log('Skinning complete. Try the animation presets, then export.');
   } catch(err){
     console.error(err);
@@ -1352,10 +1819,14 @@ function computeRestPose(){
   ['Left','Right'].forEach(function(side){
     const armBone = bonesByName[side+'Arm'];
     const foreArmBone = bonesByName[side+'ForeArm'];
+    const handBone = bonesByName[side+'Hand'];
     if(armBone && foreArmBone && foreArmBone.position.lengthSq() > 1e-10){
       const dir = foreArmBone.position.clone().normalize();
       armBindDir[side+'Arm'] = dir.clone();
       armCorrection[side+'Arm'] = new THREE.Quaternion().setFromUnitVectors(dir, down);
+    }
+    if(foreArmBone && handBone && handBone.position.lengthSq() > 1e-10){
+      armBindDir[side+'ForeArm'] = handBone.position.clone().normalize();
     }
   });
   restLocalPositions = {};
@@ -1389,87 +1860,544 @@ function q(x,y,z){
   const d = Math.PI/180;
   return new THREE.Quaternion().setFromEuler(new THREE.Euler(x*d, y*d, z*d, 'XYZ'));
 }
-const ANIM_DEFS = {
-  idle: { name:'Idle', duration:2.4, tracks:{
-    Spine1: [[0,0,0,0],[1.2,1.5,0,0],[2.4,0,0,0]],
-    Head:   [[0,0,0,0],[1.2,0,4,0],[2.4,0,0,0]],
-    Hips:   [[0,0,0,0],[1.2,0,0,1.5],[2.4,0,0,0]],
-  }, dirTracks:{
-    LeftArm:  [[0,0,-1,-0.05],[1.2,0.05,-0.998,-0.06],[2.4,0,-1,-0.05]],
-    RightArm: [[0,0,-1,-0.05],[1.2,-0.05,-0.998,-0.06],[2.4,0,-1,-0.05]],
-  }},
-  walk: { name:'Walk', duration:1.0, tracks:{
-    LeftUpLeg:  [[0,14,0,0],[0.25,0,0,0],[0.5,-14,0,0],[0.75,0,0,0],[1.0,14,0,0]],
-    RightUpLeg: [[0,-14,0,0],[0.25,0,0,0],[0.5,14,0,0],[0.75,0,0,0],[1.0,-14,0,0]],
-    LeftLeg:    [[0,6,0,0],[0.25,32,0,0],[0.5,4,0,0],[0.75,7,0,0],[1.0,6,0,0]],
-    RightLeg:   [[0,4,0,0],[0.25,7,0,0],[0.5,6,0,0],[0.75,32,0,0],[1.0,4,0,0]],
-    Spine:      [[0,0,3,0],[0.25,0,0,0],[0.5,0,-3,0],[0.75,0,0,0],[1.0,0,3,0]],
-  }, dirTracks:{
-    LeftArm:  [[0,0.08,-0.85,-0.5],[0.25,0,-0.97,-0.08],[0.5,0.08,-0.85,0.5],[0.75,0,-0.97,-0.08],[1.0,0.08,-0.85,-0.5]],
-    RightArm: [[0,-0.08,-0.85,0.5],[0.25,0,-0.97,-0.08],[0.5,-0.08,-0.85,-0.5],[0.75,0,-0.97,-0.08],[1.0,-0.08,-0.85,0.5]],
-  }, hipsBob:[[0,0],[0.25,0.015],[0.5,0],[0.75,0.015],[1.0,0]] },
-  wave: { name:'Wave', duration:2.2, tracks:{
-    RightShoulder:[[0,0,0,0],[0.3,-8,0,0],[1.9,-8,0,0],[2.2,0,0,0]],
-    RightForeArm: [[0,0,0,0],[0.4,25,0,0],[0.65,-10,0,0],[0.9,25,0,0],[1.15,-10,0,0],[1.4,25,0,0],[1.65,-10,0,0],[1.9,0,0,0],[2.2,0,0,0]],
-    Head:         [[0,0,0,0],[0.3,0,-10,0],[1.9,0,-10,0],[2.2,0,0,0]],
-  }, dirTracks:{
-    RightArm: [[0,0,-1,-0.05],[0.3,0.15,0.85,0.4],[1.9,0.15,0.85,0.4],[2.2,0,-1,-0.05]],
-    LeftArm:  [[0,0,-1,-0.05],[2.2,0,-1,-0.05]],
-  }},
-  jump: { name:'Jump', duration:1.3, tracks:{
-    LeftUpLeg: [[0,0,0,0],[0.15,35,0,0],[0.45,-15,0,0],[0.85,25,0,0],[1.0,0,0,0],[1.3,0,0,0]],
-    RightUpLeg:[[0,0,0,0],[0.15,35,0,0],[0.45,-15,0,0],[0.85,25,0,0],[1.0,0,0,0],[1.3,0,0,0]],
-    LeftLeg:   [[0,0,0,0],[0.15,55,0,0],[0.45,5,0,0],[0.85,40,0,0],[1.0,0,0,0],[1.3,0,0,0]],
-    RightLeg:  [[0,0,0,0],[0.15,55,0,0],[0.45,5,0,0],[0.85,40,0,0],[1.0,0,0,0],[1.3,0,0,0]],
-  }, dirTracks:{
-    LeftArm:  [[0,0,-1,-0.05],[0.15,0.06,-0.9,-0.35],[0.45,0.12,0.85,0.3],[0.85,0.06,-0.9,-0.15],[1.0,0,-1,-0.05],[1.3,0,-1,-0.05]],
-    RightArm: [[0,0,-1,-0.05],[0.15,-0.06,-0.9,-0.35],[0.45,-0.12,0.85,0.3],[0.85,-0.06,-0.9,-0.15],[1.0,0,-1,-0.05],[1.3,0,-1,-0.05]],
-  }, hipsBob:[[0,0],[0.15,-0.05],[0.45,0.18],[0.85,-0.06],[1.0,0.02],[1.3,0]] },
-};
+/* ---------------------------------------------------------------------
+   Curve helpers: smooth, continuous motion instead of a few linear
+   keyframes (which always look mechanical no matter how you space them).
+   --------------------------------------------------------------------- */
+function smoothstep(f){ return f*f*(3-2*f); }
+function lerp(a,b,f){ return a + (b-a)*f; }
+function timeRange(duration, n){
+  const t = [];
+  for(let i=0; i<=n; i++) t.push(duration * i / n);
+  return t;
+}
+/* piecewise-eased phase curve: segs = [{end, from, to}, ...] covering [0,duration].
+   Each segment eases in/out with zero velocity at both ends, so consecutive
+   segments join with no snap — a jump's crouch→launch→land→settle reads as
+   one continuous motion instead of four separate poses. */
+function phaseCurve(t, segs){
+  let prevEnd = 0;
+  for(const s of segs){
+    if(t <= s.end + 1e-9){
+      const span = (s.end - prevEnd) || 1e-9;
+      const f = smoothstep(Math.max(0, Math.min(1, (t - prevEnd) / span)));
+      return lerp(s.from, s.to, f);
+    }
+    prevEnd = s.end;
+  }
+  return segs[segs.length-1].to;
+}
+function makeEulerTrack(boneName, times, fn){
+  if(!bonesByName[boneName]) return null;
+  const values = [];
+  for(const t of times){
+    const r = fn(t);
+    const quat = q(r[0], r[1], r[2]);
+    values.push(quat.x, quat.y, quat.z, quat.w);
+  }
+  return new THREE.QuaternionKeyframeTrack(boneName + '.quaternion', times.slice(), values);
+}
+function makeDirTrack(boneName, times, fn){
+  const bindDir = armBindDir[boneName];
+  if(!bonesByName[boneName] || !bindDir) return null;
+  const values = [];
+  const target = new THREE.Vector3();
+  for(const t of times){
+    const d = fn(t);
+    target.set(d[0], d[1], d[2]).normalize();
+    const quat = new THREE.Quaternion().setFromUnitVectors(bindDir, target);
+    values.push(quat.x, quat.y, quat.z, quat.w);
+  }
+  return new THREE.QuaternionKeyframeTrack(boneName + '.quaternion', times.slice(), values);
+}
+function makePositionTrack(boneName, times, fn){
+  if(!bonesByName[boneName]) return null;
+  const base = (restLocalPositions[boneName] || bonesByName[boneName].position).clone();
+  const values = [];
+  for(const t of times){
+    const d = fn(t);
+    values.push(base.x + d[0], base.y + d[1], base.z + d[2]);
+  }
+  return new THREE.VectorKeyframeTrack(boneName + '.position', times.slice(), values);
+}
 
-function buildClip(def){
-  const tracks = [];
-  for(const boneName in def.tracks){
-    if(!bonesByName[boneName]) continue;
-    const kfs = def.tracks[boneName];
-    const times = kfs.map(function(k){ return k[0]; });
-    const correction = armCorrection[boneName];
-    const values = [];
-    for(const k of kfs){
-      let quat = q(k[1],k[2],k[3]);
-      if(correction) quat = correction.clone().multiply(quat);
-      values.push(quat.x,quat.y,quat.z,quat.w);
-    }
-    tracks.push(new THREE.QuaternionKeyframeTrack(boneName + '.quaternion', times, values));
+/* ---------------------------------------------------------------------
+   IDLE — a real idle isn't a single sine: it's breathing (chest rise on a
+   slower cycle than the sway), a slow weight shift from one leg to the
+   other, and arms that lag behind the torso rather than moving with it.
+   The lag is what stops it reading as a rocking mannequin.
+   --------------------------------------------------------------------- */
+function buildIdleClip(){
+  const duration = 4.0, times = timeRange(duration, 60), tracks = [];
+  function add(t){ if(t) tracks.push(t); }
+  const TAU = Math.PI*2;
+  // breath is a touch faster than the weight shift, so they drift in and out
+  // of phase and the loop never looks like it's ticking to one metronome
+  function breath(t){ return Math.sin(TAU * t/2.0); }
+  function shift(t){ return Math.sin(TAU * t/duration); }
+
+  add(makePositionTrack('Hips', times, function(t){
+    return [0.012*shift(t), 0.006*breath(t) - 0.004*Math.abs(shift(t)), 0];
+  }));
+  add(makeEulerTrack('Hips', times, function(t){ return [0, 1.6*shift(t), 2.6*shift(t)]; }));
+  add(makeEulerTrack('Spine',  times, function(t){ return [0.8*breath(t), -0.8*shift(t), -1.4*shift(t)]; }));
+  add(makeEulerTrack('Spine1', times, function(t){ return [1.1*breath(t), -0.6*shift(t), -0.9*shift(t)]; }));
+  add(makeEulerTrack('Spine2', times, function(t){ return [0.9*breath(t), -0.5*shift(t), -0.6*shift(t)]; }));
+  // head counter-rotates and lags, keeping the gaze roughly level
+  add(makeEulerTrack('Neck', times, function(t){ return [-0.6*breath(t), 1.4*Math.sin(TAU*(t-0.25)/duration), 0]; }));
+  add(makeEulerTrack('Head', times, function(t){ return [-0.5*breath(t), 2.2*Math.sin(TAU*(t-0.45)/duration), -1.2*shift(t)]; }));
+
+  // legs take the weight shift: the loaded leg straightens, the other softens
+  add(makeEulerTrack('LeftUpLeg',  times, function(t){ return [0,0, 1.2*shift(t)]; }));
+  add(makeEulerTrack('RightUpLeg', times, function(t){ return [0,0, 1.2*shift(t)]; }));
+  add(makeEulerTrack('LeftLeg',    times, function(t){ return [3.5 + 2.5*Math.max(0,-shift(t)),0,0]; }));
+  add(makeEulerTrack('RightLeg',   times, function(t){ return [3.5 + 2.5*Math.max(0, shift(t)),0,0]; }));
+
+  // arms hang with a slight natural outward/forward offset and lag the torso
+  function armLag(t){ return Math.sin(TAU*(t-0.5)/duration); }
+  add(makeDirTrack('LeftArm',  times, function(t){ return [ 0.075 + 0.022*armLag(t), -1, -0.045 + 0.03*breath(t)]; }));
+  add(makeDirTrack('RightArm', times, function(t){ return [-0.075 - 0.022*armLag(t), -1, -0.045 + 0.03*breath(t)]; }));
+  // elbows are never locked straight when relaxed
+  add(makeEulerTrack('LeftForeArm',  times, function(t){ return [10 + 2.5*armLag(t), 0, 0]; }));
+  add(makeEulerTrack('RightForeArm', times, function(t){ return [10 + 2.5*armLag(t), 0, 0]; }));
+
+  return new THREE.AnimationClip('Idle', duration, tracks);
+}
+
+/* ---------------------------------------------------------------------
+   WALK — built on the standard game-animation walk cycle rather than a
+   plain pendulum. Each leg spends ~60% of the cycle in stance and ~40% in
+   swing, so the hip curve is deliberately asymmetric (a second harmonic
+   does this). On top of that:
+     • pelvis rotates about Y, and the chest counter-rotates against it
+     • pelvis also drops toward the swinging leg (Trendelenburg tilt)
+     • two vertical bounces per cycle, lowest just after each foot lands
+     • ankles dorsiflex at heel strike and plantarflex at toe-off
+     • arms swing opposite the same-side leg, with the elbow lagging
+   These couplings are most of what separates a real walk from a shuffle.
+   --------------------------------------------------------------------- */
+function buildWalkClip(){
+  const duration = 1.1, N = 60, times = timeRange(duration, N), tracks = [];
+  function add(t){ if(t) tracks.push(t); }
+  const TAU = Math.PI*2;
+  const ph = function(t){ return (t/duration) % 1; };
+  // narrow bump centred on `c` — used for events (toe-off, knee lift)
+  function bump(p, c, w){
+    let d = Math.abs(p - c); d = Math.min(d, 1-d);
+    return Math.exp(-(d*d)/(2*w*w));
   }
-  for(const boneName in (def.dirTracks || {})){
-    const bindDir = armBindDir[boneName];
-    if(!bonesByName[boneName] || !bindDir) continue;
-    const kfs = def.dirTracks[boneName];
-    const times = kfs.map(function(k){ return k[0]; });
-    const values = [];
-    const target = new THREE.Vector3();
-    for(const k of kfs){
-      target.set(k[1], k[2], k[3]).normalize();
-      const quat = new THREE.Quaternion().setFromUnitVectors(bindDir, target);
-      values.push(quat.x, quat.y, quat.z, quat.w);
-    }
-    tracks.push(new THREE.QuaternionKeyframeTrack(boneName + '.quaternion', times, values));
+  // asymmetric hip swing: quick swing forward, slower push back through stance
+  function hip(p){ return 24*Math.sin(TAU*p) + 4.5*Math.sin(2*TAU*p); }
+  // knee: small stance flexion after contact, big flexion through swing
+  function knee(p){ return 4 + 14*bump(p,0.12,0.09) + 52*bump(p,0.73,0.13); }
+  // ankle: dorsiflex at heel strike, hard plantarflex at toe-off (~p=0.55)
+  function ankle(p){ return -7*bump(p,0.02,0.08) + 22*bump(p,0.55,0.07) - 5*bump(p,0.80,0.10); }
+
+  add(makeEulerTrack('LeftUpLeg',  times, function(t){ return [ hip(ph(t)),      0, 0]; }));
+  add(makeEulerTrack('RightUpLeg', times, function(t){ return [ hip(ph(t)+0.5),  0, 0]; }));
+  add(makeEulerTrack('LeftLeg',    times, function(t){ return [ knee(ph(t)),     0, 0]; }));
+  add(makeEulerTrack('RightLeg',   times, function(t){ return [ knee(ph(t)+0.5), 0, 0]; }));
+  add(makeEulerTrack('LeftFoot',   times, function(t){ return [ ankle(ph(t)),    0, 0]; }));
+  add(makeEulerTrack('RightFoot',  times, function(t){ return [ ankle(ph(t)+0.5),0, 0]; }));
+
+  // pelvis: twist about Y, tilt about Z toward the unsupported side
+  add(makeEulerTrack('Hips', times, function(t){
+    const p = ph(t);
+    return [1.5, -6.5*Math.sin(TAU*p), 4.0*Math.sin(TAU*p + Math.PI/2)];
+  }));
+  // two bounces per stride; lowest right after each heel strike
+  add(makePositionTrack('Hips', times, function(t){
+    const p = ph(t);
+    return [0.012*Math.sin(TAU*p), -0.013*Math.cos(2*TAU*(p-0.06)), 0];
+  }));
+  // chest counter-rotates against the pelvis — this is the key "alive" cue
+  add(makeEulerTrack('Spine',  times, function(t){ const p=ph(t); return [0, 3.0*Math.sin(TAU*p), -1.6*Math.sin(TAU*p+Math.PI/2)]; }));
+  add(makeEulerTrack('Spine1', times, function(t){ const p=ph(t); return [0, 4.0*Math.sin(TAU*p), -1.2*Math.sin(TAU*p+Math.PI/2)]; }));
+  add(makeEulerTrack('Spine2', times, function(t){ const p=ph(t); return [0, 3.0*Math.sin(TAU*p), 0]; }));
+  // head stays level and forward-facing while the chest twists under it
+  add(makeEulerTrack('Neck', times, function(t){ const p=ph(t); return [-1.0, -3.2*Math.sin(TAU*p), 0]; }));
+  add(makeEulerTrack('Head', times, function(t){ const p=ph(t); return [-0.5, -3.0*Math.sin(TAU*p), -1.5*Math.sin(TAU*p+Math.PI/2)]; }));
+
+  // arms oppose the same-side leg; elbow bend peaks as that arm swings forward
+  add(makeDirTrack('LeftArm',  times, function(t){ const p=ph(t); return [ 0.10, -0.93, -0.42*Math.sin(TAU*p)]; }));
+  add(makeDirTrack('RightArm', times, function(t){ const p=ph(t); return [-0.10, -0.93,  0.42*Math.sin(TAU*p)]; }));
+  add(makeEulerTrack('LeftForeArm',  times, function(t){ const p=ph(t); return [20 - 16*Math.sin(TAU*(p-0.08)), 0, 0]; }));
+  add(makeEulerTrack('RightForeArm', times, function(t){ const p=ph(t); return [20 + 16*Math.sin(TAU*(p-0.08)), 0, 0]; }));
+  add(makeEulerTrack('LeftShoulder',  times, function(t){ const p=ph(t); return [0, 0, -2.0*Math.sin(TAU*p)]; }));
+  add(makeEulerTrack('RightShoulder', times, function(t){ const p=ph(t); return [0, 0,  2.0*Math.sin(TAU*p)]; }));
+
+  return new THREE.AnimationClip('Walk', duration, tracks);
+}
+
+/* ---------------------------------------------------------------------
+   WAVE — the arm is raised OUT to the side and slightly forward, well
+   clear of the head and chest, and the forearm's side-to-side wiggle is
+   authored as a target DIRECTION rather than an Euler delta. That matters:
+   an Euler wiggle is applied in the forearm's own local frame, which
+   points in a completely different direction for a T-pose rig than an
+   A-pose one — which is exactly why it used to swing into the body.
+   Weight also shifts slightly onto the opposite leg, as it does for real.
+   --------------------------------------------------------------------- */
+function buildWaveClip(){
+  const duration = 2.6, N = 84, times = timeRange(duration, N), tracks = [];
+  const raiseEnd = 0.55, lowerStart = 2.05;
+  function env(t){
+    if(t <= raiseEnd) return smoothstep(t/raiseEnd);
+    if(t >= lowerStart) return smoothstep(1-(t-lowerStart)/(duration-lowerStart));
+    return 1;
   }
-  if(def.hipsBob && bonesByName['Hips']){
-    const base = (restLocalPositions['Hips'] || bonesByName['Hips'].position).clone();
-    const times = def.hipsBob.map(function(k){ return k[0]; });
-    const values = [];
-    for(const k of def.hipsBob){ values.push(base.x, base.y + k[1], base.z); }
-    tracks.push(new THREE.VectorKeyframeTrack('Hips.position', times, values));
+  function add(t){ if(t) tracks.push(t); }
+  const TAU = Math.PI*2;
+  // slight overshoot as the arm arrives, so it settles instead of stopping dead
+  function overshoot(t){
+    if(t > raiseEnd*1.9 || t < raiseEnd*0.5) return 0;
+    return Math.sin(TAU*(t-raiseEnd*0.5)/(raiseEnd*1.4)) * 0.055 * (1 - t/(raiseEnd*1.9));
   }
-  return new THREE.AnimationClip(def.name, def.duration, tracks);
+
+  const hang   = [-0.07, -1, -0.045];
+  const raised = [-0.80, 0.56, 0.22];   // up and clearly out to the character's right
+  add(makeDirTrack('RightArm', times, function(t){
+    const a = env(t), o = overshoot(t);
+    return [ lerp(hang[0],raised[0],a) - o, lerp(hang[1],raised[1],a) + o, lerp(hang[2],raised[2],a) ];
+  }));
+  add(makeDirTrack('LeftArm', times, function(t){ return [0.075, -1, -0.045 ]; }));
+  add(makeEulerTrack('LeftForeArm', times, function(){ return [10,0,0]; }));
+
+  // forearm waves between two directions that both point away from the body
+  const wIn  = [-0.52, 0.85, 0.10];
+  const wOut = [-0.90, 0.40, 0.16];
+  add(makeDirTrack('RightForeArm', times, function(t){
+    const a = env(t);
+    const s = 0.5 + 0.5*Math.sin(TAU*1.9*(t - raiseEnd));
+    const f = a * s;
+    return [ lerp(wIn[0],wOut[0],f), lerp(wIn[1],wOut[1],f), lerp(wIn[2],wOut[2],f) ];
+  }));
+
+  add(makeEulerTrack('RightShoulder', times, function(t){ return [0,0, -13*env(t)]; }));
+  add(makeEulerTrack('Spine1', times, function(t){ return [0, -4*env(t), -2.5*env(t)]; }));
+  add(makeEulerTrack('Spine2', times, function(t){ return [0, -3*env(t), -2.0*env(t)]; }));
+  add(makeEulerTrack('Neck',   times, function(t){ return [-2*env(t), 4*env(t), 0]; }));
+  add(makeEulerTrack('Head',   times, function(t){ return [-3*env(t), 6*env(t), 2*env(t)]; }));
+  // weight shifts onto the opposite (left) leg while waving
+  add(makePositionTrack('Hips', times, function(t){ return [0.02*env(t), -0.004*env(t), 0]; }));
+  add(makeEulerTrack('Hips', times, function(t){ return [0,0, 2.5*env(t)]; }));
+  add(makeEulerTrack('RightLeg', times, function(t){ return [4 + 4*env(t), 0, 0]; }));
+  add(makeEulerTrack('LeftLeg',  times, function(t){ return [4, 0, 0]; }));
+
+  return new THREE.AnimationClip('Wave', duration, tracks);
+}
+
+/* ---------------------------------------------------------------------
+   JUMP — follows the classic beats an animator would key: anticipation
+   (crouch), launch (explosive extension), tuck at the apex, reach for the
+   ground, impact absorption, then recovery. The arms lead the motion —
+   they swing down during the crouch and whip up through the launch, which
+   is what sells the effort. Every phase boundary eases to zero velocity so
+   the whole thing flows as one action.
+   --------------------------------------------------------------------- */
+function buildJumpClip(){
+  const duration = 1.9, N = 76, times = timeRange(duration, N), tracks = [];
+  function add(t){ if(t) tracks.push(t); }
+  // beats: settle .10 | crouch .38 | launch .62 | apex .95 | land 1.20 | absorb 1.42 | recover 1.9
+  const hipsY = [
+    {end:0.10, from:0,     to:-0.010},
+    {end:0.38, from:-0.010,to:-0.175},
+    {end:0.62, from:-0.175,to: 0.115},
+    {end:0.95, from: 0.115,to: 0.235},
+    {end:1.20, from: 0.235,to: 0.040},
+    {end:1.42, from: 0.040,to:-0.130},
+    {end:1.68, from:-0.130,to: 0.020},
+    {end:1.90, from: 0.020,to: 0},
+  ];
+  add(makePositionTrack('Hips', times, function(t){ return [0, phaseCurve(t,hipsY), 0]; }));
+
+  const hipRot = [
+    {end:0.10, from:0,  to:3},
+    {end:0.38, from:3,  to:42},
+    {end:0.62, from:42, to:-12},
+    {end:0.95, from:-12,to:38},
+    {end:1.20, from:38, to:6},
+    {end:1.42, from:6,  to:40},
+    {end:1.68, from:40, to:4},
+    {end:1.90, from:4,  to:0},
+  ];
+  const kneeRot = [
+    {end:0.10, from:4,  to:8},
+    {end:0.38, from:8,  to:72},
+    {end:0.62, from:72, to:6},
+    {end:0.95, from:6,  to:60},
+    {end:1.20, from:60, to:14},
+    {end:1.42, from:14, to:74},
+    {end:1.68, from:74, to:8},
+    {end:1.90, from:8,  to:4},
+  ];
+  const ankleRot = [
+    {end:0.10, from:0,   to:-4},
+    {end:0.38, from:-4,  to:-20},
+    {end:0.62, from:-20, to:32},
+    {end:0.95, from:32,  to:14},
+    {end:1.20, from:14,  to:-16},
+    {end:1.42, from:-16, to:-8},
+    {end:1.68, from:-8,  to:2},
+    {end:1.90, from:2,   to:0},
+  ];
+  ['Left','Right'].forEach(function(s){
+    add(makeEulerTrack(s+'UpLeg', times, function(t){ return [phaseCurve(t,hipRot),0,0]; }));
+    add(makeEulerTrack(s+'Leg',   times, function(t){ return [phaseCurve(t,kneeRot),0,0]; }));
+    add(makeEulerTrack(s+'Foot',  times, function(t){ return [phaseCurve(t,ankleRot),0,0]; }));
+  });
+
+  // torso folds forward into the crouch, opens through the launch, curls at apex
+  const spineRot = [
+    {end:0.10, from:0,  to:2},
+    {end:0.38, from:2,  to:26},
+    {end:0.62, from:26, to:-8},
+    {end:0.95, from:-8, to:14},
+    {end:1.20, from:14, to:2},
+    {end:1.42, from:2,  to:24},
+    {end:1.68, from:24, to:2},
+    {end:1.90, from:2,  to:0},
+  ];
+  add(makeEulerTrack('Spine',  times, function(t){ return [phaseCurve(t,spineRot)*0.45,0,0]; }));
+  add(makeEulerTrack('Spine1', times, function(t){ return [phaseCurve(t,spineRot)*0.35,0,0]; }));
+  add(makeEulerTrack('Spine2', times, function(t){ return [phaseCurve(t,spineRot)*0.20,0,0]; }));
+  // head resists the fold, keeping the gaze up — it's what makes it read as intent
+  add(makeEulerTrack('Neck', times, function(t){ return [-phaseCurve(t,spineRot)*0.42,0,0]; }));
+  add(makeEulerTrack('Head', times, function(t){ return [-phaseCurve(t,spineRot)*0.34,0,0]; }));
+
+  // arms: swing back during crouch, whip overhead through launch, then drop
+  const armY = [
+    {end:0.10, from:-1,    to:-0.99},
+    {end:0.38, from:-0.99, to:-0.72},
+    {end:0.62, from:-0.72, to: 0.86},
+    {end:0.95, from: 0.86, to: 0.72},
+    {end:1.20, from: 0.72, to: 0.10},
+    {end:1.42, from: 0.10, to:-0.80},
+    {end:1.68, from:-0.80, to:-0.97},
+    {end:1.90, from:-0.97, to:-1},
+  ];
+  const armZ = [
+    {end:0.10, from:-0.05, to:-0.10},
+    {end:0.38, from:-0.10, to:-0.62},
+    {end:0.62, from:-0.62, to: 0.40},
+    {end:0.95, from: 0.40, to: 0.16},
+    {end:1.20, from: 0.16, to: 0.48},
+    {end:1.42, from: 0.48, to:-0.42},
+    {end:1.68, from:-0.42, to:-0.10},
+    {end:1.90, from:-0.10, to:-0.05},
+  ];
+  const elbow = [
+    {end:0.10, from:10, to:14},
+    {end:0.38, from:14, to:34},
+    {end:0.62, from:34, to:10},
+    {end:0.95, from:10, to:26},
+    {end:1.20, from:26, to:18},
+    {end:1.42, from:18, to:44},
+    {end:1.68, from:44, to:14},
+    {end:1.90, from:14, to:10},
+  ];
+  add(makeDirTrack('LeftArm',  times, function(t){ return [ 0.10, phaseCurve(t,armY), phaseCurve(t,armZ)]; }));
+  add(makeDirTrack('RightArm', times, function(t){ return [-0.10, phaseCurve(t,armY), phaseCurve(t,armZ)]; }));
+  add(makeEulerTrack('LeftForeArm',  times, function(t){ return [phaseCurve(t,elbow),0,0]; }));
+  add(makeEulerTrack('RightForeArm', times, function(t){ return [phaseCurve(t,elbow),0,0]; }));
+
+  return new THREE.AnimationClip('Jump', duration, tracks);
+}
+
+/* ---------------------------------------------------------------------
+   QUADRUPED — a basic standing sway and a trot gait (diagonal leg pairs
+   move together: front-left+back-right, then front-right+back-left).
+   No arm-style rest-pose correction needed here since these legs are
+   placed already standing naturally, not held out A/T-pose style.
+   --------------------------------------------------------------------- */
+function buildQuadIdleClip(){
+  const duration = 2.6, times = timeRange(duration, 28), tracks = [];
+  function add(t){ if(t) tracks.push(t); }
+  add(makeEulerTrack('Spine1', times, function(t){ const p=t/duration; return [1.2*Math.sin(2*Math.PI*p),0,0]; }));
+  add(makeEulerTrack('Neck',   times, function(t){ const p=t/duration; return [0,3*Math.sin(2*Math.PI*p+0.7),0]; }));
+  add(makeEulerTrack('Head',   times, function(t){ const p=t/duration; return [0,4*Math.sin(2*Math.PI*p+1.2),0]; }));
+  return new THREE.AnimationClip('Idle', duration, tracks);
+}
+function buildQuadWalkClip(){
+  const duration = 1.0, N = 32, times = timeRange(duration, N), tracks = [];
+  function add(t){ if(t) tracks.push(t); }
+  function pulse(p, center){ return Math.pow(Math.max(0, Math.cos(2*Math.PI*(p-center))), 4); }
+
+  const AMP = 20;
+  add(makeEulerTrack('FrontLeftLeg',  times, function(t){ const p=t/duration; return [ AMP*Math.sin(2*Math.PI*p),0,0]; }));
+  add(makeEulerTrack('BackRightLeg',  times, function(t){ const p=t/duration; return [ AMP*Math.sin(2*Math.PI*p),0,0]; }));
+  add(makeEulerTrack('FrontRightLeg', times, function(t){ const p=t/duration; return [-AMP*Math.sin(2*Math.PI*p),0,0]; }));
+  add(makeEulerTrack('BackLeftLeg',   times, function(t){ const p=t/duration; return [-AMP*Math.sin(2*Math.PI*p),0,0]; }));
+
+  add(makeEulerTrack('FrontLeftForeleg',  times, function(t){ const p=t/duration; return [8+26*pulse(p,0),0,0]; }));
+  add(makeEulerTrack('BackRightForeleg',  times, function(t){ const p=t/duration; return [8+26*pulse(p,0),0,0]; }));
+  add(makeEulerTrack('FrontRightForeleg', times, function(t){ const p=t/duration; return [8+26*pulse(p,0.5),0,0]; }));
+  add(makeEulerTrack('BackLeftForeleg',   times, function(t){ const p=t/duration; return [8+26*pulse(p,0.5),0,0]; }));
+
+  add(makeEulerTrack('Spine', times, function(t){ const p=t/duration; return [0,0,2.5*Math.sin(2*Math.PI*p)]; }));
+  add(makeEulerTrack('Neck',  times, function(t){ const p=t/duration; return [1.5*Math.sin(4*Math.PI*p),0,0]; }));
+  add(makePositionTrack('Hips', times, function(t){ const p=t/duration; return [0, 0.008*(1-Math.cos(4*Math.PI*p)), 0]; }));
+
+  return new THREE.AnimationClip('Walk', duration, tracks);
+}
+
+/* ---------------------------------------------------------------------
+   BIRD — the two signature behaviours are head stabilisation (a walking
+   bird thrusts its head forward then holds it stock still while the body
+   catches up, rather than bobbing smoothly) and the neck doing most of the
+   work. Both are built explicitly below.
+   --------------------------------------------------------------------- */
+function buildBirdIdleClip(){
+  const duration = 3.0, times = timeRange(duration, 48), tracks = [];
+  function add(t){ if(t) tracks.push(t); }
+  const TAU = Math.PI*2;
+  function breath(t){ return Math.sin(TAU*t/1.6); }
+  function look(t){ return Math.sin(TAU*t/duration); }
+  add(makeEulerTrack('Spine1', times, function(t){ return [1.0*breath(t),0,0]; }));
+  add(makeEulerTrack('Neck',   times, function(t){ return [-2.0*breath(t), 5*look(t), 0]; }));
+  add(makeEulerTrack('Neck1',  times, function(t){ return [ 1.5*breath(t), 7*Math.sin(TAU*(t-0.2)/duration), 0]; }));
+  add(makeEulerTrack('Neck2',  times, function(t){ return [-1.0*breath(t), 6*Math.sin(TAU*(t-0.35)/duration), 0]; }));
+  // small sharp head flicks — birds rarely hold a pose for long
+  add(makeEulerTrack('Head', times, function(t){
+    const flick = Math.exp(-Math.pow((t % 1.5) - 0.2, 2)/0.006);
+    return [-4*flick, 9*Math.sin(TAU*(t-0.5)/duration) + 6*flick, 0];
+  }));
+  add(makeEulerTrack('Tail', times, function(t){ return [2.5*breath(t), 3*look(t), 0]; }));
+  add(makePositionTrack('Hips', times, function(t){ return [0, 0.004*breath(t), 0]; }));
+  return new THREE.AnimationClip('Idle', duration, tracks);
+}
+
+function buildBirdWalkClip(){
+  const duration = 0.9, N = 48, times = timeRange(duration, N), tracks = [];
+  function add(t){ if(t) tracks.push(t); }
+  const TAU = Math.PI*2;
+  const ph = function(t){ return (t/duration) % 1; };
+  function bump(p,c,w){ let d=Math.abs(p-c); d=Math.min(d,1-d); return Math.exp(-(d*d)/(2*w*w)); }
+
+  // digitigrade stride: the hock (Foot) does the big folding, not the knee
+  function hip(p){ return 16*Math.sin(TAU*p); }
+  function hock(p){ return -25 - 38*bump(p,0.72,0.13); }
+  function toe(p){ return 12 + 26*bump(p,0.78,0.12); }
+  ['Left','Right'].forEach(function(s, i){
+    const off = i * 0.5;
+    add(makeEulerTrack(s+'UpLeg', times, function(t){ return [ hip(ph(t)+off),0,0]; }));
+    add(makeEulerTrack(s+'Leg',   times, function(t){ return [ 20 + 10*bump(ph(t)+off,0.72,0.14),0,0]; }));
+    add(makeEulerTrack(s+'Foot',  times, function(t){ return [ hock(ph(t)+off),0,0]; }));
+    add(makeEulerTrack(s+'Toe',   times, function(t){ return [ toe(ph(t)+off),0,0]; }));
+  });
+
+  // body rocks side to side over the supporting leg — birds waddle
+  add(makeEulerTrack('Hips', times, function(t){ const p=ph(t); return [0, -4*Math.sin(TAU*p), 7*Math.sin(TAU*p)]; }));
+  add(makePositionTrack('Hips', times, function(t){
+    const p=ph(t);
+    return [0.012*Math.sin(TAU*p), -0.006*Math.cos(2*TAU*p), 0];
+  }));
+  add(makeEulerTrack('Spine',  times, function(t){ const p=ph(t); return [0, 2*Math.sin(TAU*p), -3*Math.sin(TAU*p)]; }));
+  add(makeEulerTrack('Spine1', times, function(t){ const p=ph(t); return [0, 2*Math.sin(TAU*p), -2*Math.sin(TAU*p)]; }));
+
+  // HEAD STABILISATION: thrust forward fast, then hold while the body walks
+  // into it. A sawtooth (not a sine) is what produces that held-still look.
+  function thrust(p){ return p < 0.30 ? smoothstep(p/0.30) : 1 - (p-0.30)/0.70; }
+  add(makeEulerTrack('Neck',  times, function(t){ const p=ph(t); return [-14 + 20*thrust(p), 0, 0]; }));
+  add(makeEulerTrack('Neck1', times, function(t){ const p=ph(t); return [ 10 - 16*thrust(p), 0, 0]; }));
+  add(makeEulerTrack('Neck2', times, function(t){ const p=ph(t); return [  6 - 10*thrust(p), 0, 0]; }));
+  add(makeEulerTrack('Head',  times, function(t){ const p=ph(t); return [ -2 + 4*thrust(p), 0, 0]; }));
+  add(makeEulerTrack('Tail',  times, function(t){ const p=ph(t); return [3*Math.sin(2*TAU*p), 0, 5*Math.sin(TAU*p)]; }));
+
+  // wings stay folded, just easing with the body's rock
+  ['Left','Right'].forEach(function(s, i){
+    const sg = i === 0 ? 1 : -1;
+    add(makeEulerTrack(s+'Wing', times, function(t){ const p=ph(t); return [0,0, sg*(3 + 2*Math.sin(TAU*p))]; }));
+  });
+
+  return new THREE.AnimationClip('Walk', duration, tracks);
+}
+
+function buildBirdPeckClip(){
+  const duration = 1.6, N = 56, times = timeRange(duration, N), tracks = [];
+  function add(t){ if(t) tracks.push(t); }
+  // down fast, brief grab, back up slower, then a pause before looping
+  const neckSegs = [
+    {end:0.10, from:0,  to:-6},
+    {end:0.34, from:-6, to:62},
+    {end:0.50, from:62, to:66},
+    {end:0.82, from:66, to:-4},
+    {end:1.60, from:-4, to:0},
+  ];
+  const neck1Segs = [
+    {end:0.10, from:0,  to:-4},
+    {end:0.34, from:-4, to:40},
+    {end:0.50, from:40, to:44},
+    {end:0.82, from:44, to:-2},
+    {end:1.60, from:-2, to:0},
+  ];
+  const headSegs = [
+    {end:0.10, from:0,   to:4},
+    {end:0.34, from:4,   to:-18},
+    {end:0.50, from:-18, to:-24},
+    {end:0.82, from:-24, to:2},
+    {end:1.60, from:2,   to:0},
+  ];
+  add(makeEulerTrack('Neck',  times, function(t){ return [phaseCurve(t,neckSegs),0,0]; }));
+  add(makeEulerTrack('Neck1', times, function(t){ return [phaseCurve(t,neck1Segs),0,0]; }));
+  add(makeEulerTrack('Neck2', times, function(t){ return [phaseCurve(t,neck1Segs)*0.5,0,0]; }));
+  add(makeEulerTrack('Head',  times, function(t){ return [phaseCurve(t,headSegs),0,0]; }));
+  add(makeEulerTrack('Spine1',times, function(t){ return [phaseCurve(t,neckSegs)*0.12,0,0]; }));
+  add(makeEulerTrack('Tail',  times, function(t){ return [-phaseCurve(t,neckSegs)*0.18,0,0]; }));
+  add(makePositionTrack('Hips', times, function(t){ return [0, -0.02*(phaseCurve(t,neckSegs)/66), 0]; }));
+  return new THREE.AnimationClip('Peck', duration, tracks);
+}
+
+function buildBirdFlapClip(){
+  const duration = 1.0, N = 48, times = timeRange(duration, N), tracks = [];
+  function add(t){ if(t) tracks.push(t); }
+  const TAU = Math.PI*2;
+  // downstroke is faster than the recovery upstroke, and the wing tip lags
+  // behind the shoulder — that trailing delay is what makes a flap read as
+  // a flexible wing rather than a rigid plank hinging up and down.
+  function stroke(t, lag){
+    const p = ((t/duration) - lag + 1) % 1;
+    return p < 0.4 ? -Math.cos(Math.PI * p/0.4) : Math.cos(Math.PI * (p-0.4)/0.6);
+  }
+  ['Left','Right'].forEach(function(s, i){
+    const sg = i === 0 ? 1 : -1;
+    add(makeEulerTrack(s+'Wing', times, function(t){
+      return [0, 0, sg * (10 + 52*stroke(t,0)) ];
+    }));
+    add(makeEulerTrack(s+'WingForearm', times, function(t){
+      return [0, sg * 10 * stroke(t,0.06), sg * (6 + 26*stroke(t,0.06)) ];
+    }));
+    add(makeEulerTrack(s+'WingHand', times, function(t){
+      return [0, 0, sg * (4 + 20*stroke(t,0.12)) ];
+    }));
+  });
+  add(makePositionTrack('Hips', times, function(t){ return [0, 0.022*stroke(t,0.18), 0]; }));
+  add(makeEulerTrack('Spine1', times, function(t){ return [-3*stroke(t,0.1),0,0]; }));
+  add(makeEulerTrack('Neck',   times, function(t){ return [ 4*stroke(t,0.15),0,0]; }));
+  add(makeEulerTrack('Tail',   times, function(t){ return [ 8*stroke(t,0.2),0,0]; }));
+  return new THREE.AnimationClip('Flap', duration, tracks);
 }
 
 function buildAllClips(){
-  allClips = [];
-  for(const key in ANIM_DEFS){
-    allClips.push({ key: key, name: ANIM_DEFS[key].name, clip: buildClip(ANIM_DEFS[key]) });
+  if(bodyType === 'bird'){
+    allClips = [
+      { key:'idle', name:'Idle', clip: buildBirdIdleClip() },
+      { key:'walk', name:'Walk', clip: buildBirdWalkClip() },
+      { key:'peck', name:'Peck', clip: buildBirdPeckClip() },
+      { key:'flap', name:'Flap', clip: buildBirdFlapClip() },
+    ];
+  } else if(bodyType === 'quadruped'){
+    allClips = [
+      { key:'idle', name:'Idle', clip: buildQuadIdleClip() },
+      { key:'walk', name:'Walk', clip: buildQuadWalkClip() },
+    ];
+  } else {
+    allClips = [
+      { key:'idle', name:'Idle', clip: buildIdleClip() },
+      { key:'walk', name:'Walk', clip: buildWalkClip() },
+      { key:'wave', name:'Wave', clip: buildWaveClip() },
+      { key:'jump', name:'Jump', clip: buildJumpClip() },
+    ];
   }
 }
 
@@ -1881,11 +2809,37 @@ document.getElementById('fileInput').addEventListener('change', function(e){
 });
 
 document.getElementById('sampleBtn').addEventListener('click', function(){
-  log('Building procedural sample figure…');
-  loadMeshFromGeometry(buildSampleFigure(), 'Sample Figure');
+  if(bodyType === 'quadruped'){
+    log('Building procedural sample quadruped…');
+    loadMeshFromGeometry(buildSampleQuadruped(), 'Sample Quadruped');
+  } else if(bodyType === 'bird'){
+    log('Building procedural sample bird…');
+    loadMeshFromGeometry(buildSampleBird(), 'Sample Bird');
+  } else {
+    log('Building procedural sample figure…');
+    loadMeshFromGeometry(buildSampleFigure(), 'Sample Figure');
+  }
+});
+
+document.querySelectorAll('#bodyTypeChips .chip').forEach(function(btn){
+  btn.addEventListener('click', function(){
+    bodyType = btn.dataset.body;
+    document.querySelectorAll('#bodyTypeChips .chip').forEach(function(b){ b.classList.toggle('on', b === btn); });
+    const isHuman = bodyType === 'humanoid';
+    document.getElementById('poseChips').style.display = isHuman ? '' : 'none';
+    const hints = {
+      humanoid: 'Pick the pose your mesh is actually in — joints are found by locating real landmarks in the mesh (neck constriction, armpit, crotch, ankle) and tracing each limb\'s centerline. Fine-tune every joint by hand next.',
+      quadruped:'Quadruped bones are placed from plain body-box fractions (front/back legs, spine along the body\'s length) — a rougher first pass than the humanoid rig. Fine-tune every joint by hand next.',
+      bird:     'Bird bones are placed from plain body-box fractions: a three-joint neck, folded wings, and digitigrade legs (the visible backward-bending joint is the ankle, not the knee). Fine-tune every joint by hand next.',
+    };
+    document.getElementById('rigHint').textContent = hints[bodyType] || hints.humanoid;
+    const labels = { humanoid:'Humanoid', quadruped:'Animal (quadruped)', bird:'Bird / poultry' };
+    log('Body type set to ' + (labels[bodyType] || bodyType) + '.');
+  });
 });
 
 document.getElementById('rigBtn').addEventListener('click', function(){ estimateRig(); });
+document.getElementById('reeditBtn').addEventListener('click', function(){ reopenForEditing(); });
 
 document.querySelectorAll('#poseChips .chip').forEach(function(btn){
   btn.addEventListener('click', function(){
@@ -1896,6 +2850,10 @@ document.querySelectorAll('#poseChips .chip').forEach(function(btn){
 
 document.getElementById('skeletonToggle').addEventListener('change', function(e){
   if(skeletonHelper) skeletonHelper.visible = e.target.checked;
+});
+
+document.getElementById('symmetryToggle').addEventListener('change', function(e){
+  symmetryEnabled = e.target.checked;
 });
 
 document.getElementById('jointSelect').addEventListener('change', function(e){ selectJoint(e.target.value); });
