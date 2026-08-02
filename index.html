@@ -1965,66 +1965,96 @@ function buildIdleClip(){
 }
 
 /* ---------------------------------------------------------------------
-   WALK — built on the standard game-animation walk cycle rather than a
-   plain pendulum. Each leg spends ~60% of the cycle in stance and ~40% in
-   swing, so the hip curve is deliberately asymmetric (a second harmonic
-   does this). On top of that:
-     • pelvis rotates about Y, and the chest counter-rotates against it
-     • pelvis also drops toward the swinging leg (Trendelenburg tilt)
-     • two vertical bounces per cycle, lowest just after each foot lands
-     • ankles dorsiflex at heel strike and plantarflex at toe-off
-     • arms swing opposite the same-side leg, with the elbow lagging
-   These couplings are most of what separates a real walk from a shuffle.
+   WALK — rebuilt around the actual gait cycle, with heel strike defined as
+   phase 0 and every event keyed at its real place in the cycle:
+
+     p=0.00  heel strike        p=0.12  loading (knee absorbs)
+     p=0.30  mid-stance         p=0.50  heel off
+     p=0.60  toe-off            p=0.72  mid-swing (peak knee bend)
+     p=0.95  terminal swing (leg extends, reaching for the next strike)
+
+   Stance occupies ~60% of the cycle and swing ~40%, which is what makes a
+   walk read as weighted rather than as a pendulum swinging both ways at
+   equal speed. Curves run through these keys on a cyclic Catmull-Rom
+   spline, so the motion carries velocity THROUGH each key instead of
+   easing to a stop at every one — that continuous momentum is the main
+   thing separating a real walk from a series of poses.
    --------------------------------------------------------------------- */
+/* cyclic Catmull-Rom through [phase, value] keys — wraps seamlessly, and
+   unlike smoothstep it does not flatten to zero velocity at every key */
+function cyclicSpline(p, keys){
+  p = ((p % 1) + 1) % 1;
+  const n = keys.length;
+  let i = 0;
+  for(let k = 0; k < n; k++){ if(keys[k][0] <= p) i = k; }
+  const k0 = keys[(i-1+n)%n], k1 = keys[i], k2 = keys[(i+1)%n], k3 = keys[(i+2)%n];
+  let t0 = k1[0], t1 = k2[0];
+  if(t1 <= t0) t1 += 1;
+  let pp = p; if(pp < t0) pp += 1;
+  const t = (t1 - t0) > 1e-9 ? (pp - t0) / (t1 - t0) : 0;
+  const v0 = k0[1], v1 = k1[1], v2 = k2[1], v3 = k3[1];
+  const t2 = t*t, t3 = t2*t;
+  return 0.5*((2*v1) + (-v0+v2)*t + (2*v0-5*v1+4*v2-v3)*t2 + (-v0+3*v1-3*v2+v3)*t3);
+}
+
 function buildWalkClip(){
-  const duration = 1.1, N = 60, times = timeRange(duration, N), tracks = [];
+  const duration = 1.15, N = 72, times = timeRange(duration, N), tracks = [];
   function add(t){ if(t) tracks.push(t); }
   const TAU = Math.PI*2;
   const ph = function(t){ return (t/duration) % 1; };
-  // narrow bump centred on `c` — used for events (toe-off, knee lift)
-  function bump(p, c, w){
-    let d = Math.abs(p - c); d = Math.min(d, 1-d);
-    return Math.exp(-(d*d)/(2*w*w));
-  }
-  // asymmetric hip swing: quick swing forward, slower push back through stance
-  function hip(p){ return 24*Math.sin(TAU*p) + 4.5*Math.sin(2*TAU*p); }
-  // knee: small stance flexion after contact, big flexion through swing
-  function knee(p){ return 4 + 14*bump(p,0.12,0.09) + 52*bump(p,0.73,0.13); }
-  // ankle: dorsiflex at heel strike, hard plantarflex at toe-off (~p=0.55)
-  function ankle(p){ return -7*bump(p,0.02,0.08) + 22*bump(p,0.55,0.07) - 5*bump(p,0.80,0.10); }
 
-  add(makeEulerTrack('LeftUpLeg',  times, function(t){ return [ hip(ph(t)),      0, 0]; }));
-  add(makeEulerTrack('RightUpLeg', times, function(t){ return [ hip(ph(t)+0.5),  0, 0]; }));
-  add(makeEulerTrack('LeftLeg',    times, function(t){ return [ knee(ph(t)),     0, 0]; }));
-  add(makeEulerTrack('RightLeg',   times, function(t){ return [ knee(ph(t)+0.5), 0, 0]; }));
-  add(makeEulerTrack('LeftFoot',   times, function(t){ return [ ankle(ph(t)),    0, 0]; }));
-  add(makeEulerTrack('RightFoot',  times, function(t){ return [ ankle(ph(t)+0.5),0, 0]; }));
+  // SIGN CONVENTION (from the three.js X-rotation matrix): for a bone whose
+  // child sits below it, +X rotation swings that child toward -Z. The model
+  // faces +Z, so +X = leg BACKWARD and -X = leg FORWARD. Getting this
+  // backwards puts the knee's swing-phase bend on the planted leg instead,
+  // which is exactly what makes a walk look broken.
+  // Cycle is referenced to heel strike at p=0; toe-off lands at p≈0.60.
 
-  // pelvis: twist about Y, tilt about Z toward the unsupported side
+  // thigh: forward at strike (negative), driving back through stance, then
+  // whipping forward again through swing
+  const HIP   = [[0.00,-22],[0.15,-15],[0.30,-6],[0.45,6],[0.55,16],[0.62,20],[0.75,4],[0.88,-14]];
+  // knee: nearly straight at strike, small absorb under load, straight again
+  // at mid-stance, then the big ground-clearance bend peaking at mid-swing
+  const KNEE  = [[0.00,6],[0.13,18],[0.30,6],[0.50,12],[0.62,32],[0.75,60],[0.87,30],[0.95,10]];
+  // ankle: dorsiflexed so the heel lands first, foot flattens, tibia rolls
+  // over it, hard plantarflex push at toe-off, then toes lift to clear
+  const ANKLE = [[0.00,-6],[0.10,2],[0.30,-2],[0.48,8],[0.60,22],[0.70,2],[0.82,-8],[0.92,-7]];
+
+  ['Left','Right'].forEach(function(s, i){
+    const off = i * 0.5;   // right leg is exactly half a cycle out of phase
+    add(makeEulerTrack(s+'UpLeg', times, function(t){ return [cyclicSpline(ph(t)+off, HIP),   0, 0]; }));
+    add(makeEulerTrack(s+'Leg',   times, function(t){ return [cyclicSpline(ph(t)+off, KNEE),  0, 0]; }));
+    add(makeEulerTrack(s+'Foot',  times, function(t){ return [cyclicSpline(ph(t)+off, ANKLE), 0, 0]; }));
+  });
+
+  // pelvis: rotates so the striking leg's hip leads, and drops toward the
+  // unsupported side (left leg swings around p=0.8, right around p=0.3)
   add(makeEulerTrack('Hips', times, function(t){
     const p = ph(t);
-    return [1.5, -6.5*Math.sin(TAU*p), 4.0*Math.sin(TAU*p + Math.PI/2)];
+    return [1.5, -5.5*Math.cos(TAU*p), 3.5*Math.cos(TAU*(p-0.8))];
   }));
-  // two bounces per stride; lowest right after each heel strike
+  // highest at mid-stance (p≈0.3 and 0.8), lowest at the double-support beats
   add(makePositionTrack('Hips', times, function(t){
     const p = ph(t);
-    return [0.012*Math.sin(TAU*p), -0.013*Math.cos(2*TAU*(p-0.06)), 0];
+    return [0.010*Math.cos(TAU*(p-0.8)), 0.014*Math.cos(2*TAU*(p-0.30)), 0];
   }));
-  // chest counter-rotates against the pelvis — this is the key "alive" cue
-  add(makeEulerTrack('Spine',  times, function(t){ const p=ph(t); return [0, 3.0*Math.sin(TAU*p), -1.6*Math.sin(TAU*p+Math.PI/2)]; }));
-  add(makeEulerTrack('Spine1', times, function(t){ const p=ph(t); return [0, 4.0*Math.sin(TAU*p), -1.2*Math.sin(TAU*p+Math.PI/2)]; }));
-  add(makeEulerTrack('Spine2', times, function(t){ const p=ph(t); return [0, 3.0*Math.sin(TAU*p), 0]; }));
-  // head stays level and forward-facing while the chest twists under it
-  add(makeEulerTrack('Neck', times, function(t){ const p=ph(t); return [-1.0, -3.2*Math.sin(TAU*p), 0]; }));
-  add(makeEulerTrack('Head', times, function(t){ const p=ph(t); return [-0.5, -3.0*Math.sin(TAU*p), -1.5*Math.sin(TAU*p+Math.PI/2)]; }));
 
-  // arms oppose the same-side leg; elbow bend peaks as that arm swings forward
-  add(makeDirTrack('LeftArm',  times, function(t){ const p=ph(t); return [ 0.10, -0.93, -0.42*Math.sin(TAU*p)]; }));
-  add(makeDirTrack('RightArm', times, function(t){ const p=ph(t); return [-0.10, -0.93,  0.42*Math.sin(TAU*p)]; }));
-  add(makeEulerTrack('LeftForeArm',  times, function(t){ const p=ph(t); return [20 - 16*Math.sin(TAU*(p-0.08)), 0, 0]; }));
-  add(makeEulerTrack('RightForeArm', times, function(t){ const p=ph(t); return [20 + 16*Math.sin(TAU*(p-0.08)), 0, 0]; }));
-  add(makeEulerTrack('LeftShoulder',  times, function(t){ const p=ph(t); return [0, 0, -2.0*Math.sin(TAU*p)]; }));
-  add(makeEulerTrack('RightShoulder', times, function(t){ const p=ph(t); return [0, 0,  2.0*Math.sin(TAU*p)]; }));
+  // chest counter-rotates against the pelvis; head stays level and forward
+  add(makeEulerTrack('Spine',  times, function(t){ const p=ph(t); return [0.5, 2.6*Math.cos(TAU*p), -1.6*Math.cos(TAU*(p-0.8))]; }));
+  add(makeEulerTrack('Spine1', times, function(t){ const p=ph(t); return [0.5, 3.6*Math.cos(TAU*p), -1.2*Math.cos(TAU*(p-0.8))]; }));
+  add(makeEulerTrack('Spine2', times, function(t){ const p=ph(t); return [0,   2.6*Math.cos(TAU*p), 0]; }));
+  add(makeEulerTrack('Neck',   times, function(t){ const p=ph(t); return [-1.0, -2.8*Math.cos(TAU*p), 0]; }));
+  add(makeEulerTrack('Head',   times, function(t){ const p=ph(t); return [-0.5, -2.6*Math.cos(TAU*p), -1.2*Math.cos(TAU*(p-0.8))]; }));
+
+  // each arm opposes the same-side leg: left leg is forward at p=0, so the
+  // left arm is at its furthest back there
+  add(makeDirTrack('LeftArm',  times, function(t){ const p=ph(t); return [ 0.10, -0.93, -0.40*Math.cos(TAU*p)]; }));
+  add(makeDirTrack('RightArm', times, function(t){ const p=ph(t); return [-0.10, -0.93,  0.40*Math.cos(TAU*p)]; }));
+  // elbow bends most as that arm swings through in front of the body
+  add(makeEulerTrack('LeftForeArm',  times, function(t){ const p=ph(t); return [19 - 13*Math.cos(TAU*(p-0.10)), 0, 0]; }));
+  add(makeEulerTrack('RightForeArm', times, function(t){ const p=ph(t); return [19 + 13*Math.cos(TAU*(p-0.10)), 0, 0]; }));
+  add(makeEulerTrack('LeftShoulder',  times, function(t){ const p=ph(t); return [0, 0, -1.8*Math.cos(TAU*p)]; }));
+  add(makeEulerTrack('RightShoulder', times, function(t){ const p=ph(t); return [0, 0,  1.8*Math.cos(TAU*p)]; }));
 
   return new THREE.AnimationClip('Walk', duration, tracks);
 }
@@ -2111,15 +2141,19 @@ function buildJumpClip(){
   ];
   add(makePositionTrack('Hips', times, function(t){ return [0, phaseCurve(t,hipsY), 0]; }));
 
+  // Same sign convention as the walk: negative = thigh swings FORWARD (hip
+  // flexion, i.e. crouching and tucking), positive = thigh drives BACK
+  // (extension, i.e. the push at launch). The knee stays positive throughout
+  // since a knee only ever folds the shin backward.
   const hipRot = [
-    {end:0.10, from:0,  to:3},
-    {end:0.38, from:3,  to:42},
-    {end:0.62, from:42, to:-12},
-    {end:0.95, from:-12,to:38},
-    {end:1.20, from:38, to:6},
-    {end:1.42, from:6,  to:40},
-    {end:1.68, from:40, to:4},
-    {end:1.90, from:4,  to:0},
+    {end:0.10, from:0,   to:-3},
+    {end:0.38, from:-3,  to:-44},   // crouch: deep hip flexion
+    {end:0.62, from:-44, to:14},    // launch: hips drive open
+    {end:0.95, from:14,  to:-40},   // apex: knees tuck up
+    {end:1.20, from:-40, to:-14},   // reach the feet down for the ground
+    {end:1.42, from:-14, to:-42},   // impact absorption
+    {end:1.68, from:-42, to:-5},
+    {end:1.90, from:-5,  to:0},
   ];
   const kneeRot = [
     {end:0.10, from:4,  to:8},
