@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-<title>Mesh → Motion — Auto-Rig Studio</title>
+<title>Mesh Rigger</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -27,7 +27,13 @@
   }
   *{box-sizing:border-box;}
   html,body{margin:0;padding:0;height:100%;background:var(--bg);color:var(--text);font-family:var(--body);-webkit-tap-highlight-color:transparent;overscroll-behavior:none;}
-  body{display:flex;flex-direction:column;}
+  body{display:flex;flex-direction:column;touch-action:manipulation;}
+  /* iOS ignores user-scalable=no, so double-tap zoom has to be turned off in
+     CSS. `manipulation` keeps scrolling and pinch working but drops the
+     double-tap gesture — without it, tapping a nudge button twice quickly
+     (which is the normal way to use these) zooms the whole page. */
+  button, label, select, input, .chip, .nudge, .filebtn, .checkline,
+  #panel, header, .card{ touch-action:manipulation; }
   #app{display:flex;flex-direction:column;flex:1 1 auto;min-height:0;}
 
   /* ---------- header / stepper ---------- */
@@ -174,7 +180,7 @@
 
   <header>
     <div class="brand">
-      <h1>MESH <span>→</span> MOTION</h1>
+      <h1>MESH <span>RIGGER</span></h1>
       <small>auto-rig studio</small>
     </div>
     <div class="stepper" id="stepper">
@@ -217,6 +223,46 @@
         <div class="stat-grid" id="uploadStats" style="display:none;">
           <div><div class="k">Source</div><div class="v" id="statSource">–</div></div>
           <div><div class="k">Height (units)</div><div class="v" id="statHeight">–</div></div>
+        </div>
+      </section>
+
+      <section class="card locked" id="card-transform">
+        <h2><span class="num">01b</span> Transform model</h2>
+        <p class="hint">Fix a model that's lying down, facing the wrong way, or the wrong size before rigging. Changes are baked into the mesh, so re-estimate the skeleton afterwards.</p>
+        <div class="row" id="xformModeChips">
+          <button class="chip small on" data-xf="rotate">Rotate</button>
+          <button class="chip small" data-xf="move">Move</button>
+          <button class="chip small" data-xf="scale">Scale</button>
+        </div>
+        <div class="row" id="xformStepChips" style="margin-top:8px;">
+          <button class="chip small" data-step="fine">Fine</button>
+          <button class="chip small on" data-step="normal">Normal</button>
+          <button class="chip small" data-step="coarse">Coarse</button>
+        </div>
+        <div class="nudge-grid" id="xformGrid" style="margin-top:10px;">
+          <span class="nudge-axis">X</span>
+          <button class="small nudge" data-xaxis="x" data-sign="-1">−</button>
+          <button class="small nudge" data-xaxis="x" data-sign="1">+</button>
+          <span class="nudge-axis">Y</span>
+          <button class="small nudge" data-xaxis="y" data-sign="-1">−</button>
+          <button class="small nudge" data-xaxis="y" data-sign="1">+</button>
+          <span class="nudge-axis">Z</span>
+          <button class="small nudge" data-xaxis="z" data-sign="-1">−</button>
+          <button class="small nudge" data-xaxis="z" data-sign="1">+</button>
+        </div>
+        <div class="row" style="margin-top:10px;">
+          <button class="small" id="undoBtn" disabled>↶ Undo</button>
+          <button class="small" id="redoBtn" disabled>↷ Redo</button>
+          <button class="ghost small" id="xformResetBtn">↺ Reset</button>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <button class="ghost small" id="groundBtn">⤓ Drop to grid</button>
+          <button class="ghost small" id="recenterBtn">⊹ Center</button>
+        </div>
+        <label class="checkline"><input type="checkbox" id="gridToggle" checked> show ground grid</label>
+        <div class="stat-grid" style="margin-top:8px;">
+          <div><div class="k">Applied steps</div><div class="v" id="statXforms">0</div></div>
+          <div><div class="k">Size (h × w × d)</div><div class="v" id="statSize" style="font-size:10.5px;">–</div></div>
         </div>
       </section>
 
@@ -306,7 +352,7 @@
 
 <script>
 /* =========================================================================
-   MESH → MOTION — Auto-Rig Studio
+   MESH RIGGER
    Single-file three.js app: upload a humanoid mesh (OBJ/STL), auto-generate
    a heuristic humanoid skeleton fitted to its bounding box, compute skin
    weights by proximity, play preset animation clips, export a self-
@@ -316,6 +362,18 @@
 /* ---------------------------------------------------------------------
    0. LOG / DOM HELPERS
    --------------------------------------------------------------------- */
+/* Safari on iOS fires its own non-standard gesture events for pinch-zoom, so
+   those are suppressed explicitly; the CSS `touch-action: manipulation` above
+   is what actually kills double-tap zoom. Note we deliberately do NOT
+   preventDefault on touchend to block double taps — that would also cancel
+   the synthesized click, so a quickly double-tapped nudge button would
+   silently do nothing. The canvas keeps its own pinch handling (see
+   setupControls); this only blocks zooming the PAGE. */
+['gesturestart','gesturechange','gestureend'].forEach(function(evt){
+  document.addEventListener(evt, function(e){ e.preventDefault(); }, { passive:false });
+});
+document.addEventListener('dblclick', function(e){ e.preventDefault(); }, { passive:false });
+
 function log(msg){
   const el = document.getElementById('log');
   if(!el) return;
@@ -501,7 +559,8 @@ const fillLight = new THREE.DirectionalLight(0x88aaff, 0.25);
 fillLight.position.set(-3, 2, -2);
 scene.add(fillLight);
 
-const grid = new THREE.GridHelper(6, 24, 0x2a3138, 0x1a1f24);
+let grid = new THREE.GridHelper(6, 24, 0x2a3138, 0x1a1f24);
+grid.userData.span = 6;
 scene.add(grid);
 
 const previewMaterial = new THREE.MeshStandardMaterial({
@@ -1008,6 +1067,181 @@ function buildSampleBird(){
 /* ---------------------------------------------------------------------
    4. LOAD MESH → PREVIEW
    --------------------------------------------------------------------- */
+/* ---------------------------------------------------------------------
+   3c. TRANSFORM EDITOR (rotate / move / scale, with undo + redo)
+   A pristine copy of the loaded vertices is kept, plus an ordered stack of
+   operations. Every change rebuilds the mesh from that original rather than
+   compounding matrices onto the live buffer — so undo is exact and twenty
+   edits in a row introduce no accumulated float drift or shear.
+   --------------------------------------------------------------------- */
+let originalPositions = null;
+let originalNormals = null;
+let transformOps = [];
+let transformRedo = [];
+
+const XFORM_STEPS = {
+  rotate: { fine: 5,     normal: 15,   coarse: 90 },     // degrees
+  move:   { fine: 0.01,  normal: 0.05, coarse: 0.20 },   // fraction of model height
+  scale:  { fine: 1.02,  normal: 1.10, coarse: 1.50 },   // multiplier
+};
+let xformMode = 'rotate';
+let xformStep = 'normal';
+
+function captureOriginalGeometry(geometry){
+  originalPositions = new Float32Array(geometry.attributes.position.array);
+  originalNormals = geometry.attributes.normal ? new Float32Array(geometry.attributes.normal.array) : null;
+  transformOps = [];
+  transformRedo = [];
+  refreshTransformUI();
+}
+
+function applyTransformStack(){
+  if(!currentGeometry || !originalPositions) return;
+  const acc = new THREE.Matrix4();
+  for(const op of transformOps) acc.premultiply(op.matrix);
+
+  const posAttr = currentGeometry.attributes.position;
+  const v = new THREE.Vector3();
+  for(let i=0; i<posAttr.count; i++){
+    v.set(originalPositions[i*3], originalPositions[i*3+1], originalPositions[i*3+2]).applyMatrix4(acc);
+    posAttr.setXYZ(i, v.x, v.y, v.z);
+  }
+  posAttr.needsUpdate = true;
+
+  if(originalNormals && currentGeometry.attributes.normal){
+    const nAttr = currentGeometry.attributes.normal;
+    const nm = new THREE.Matrix3().getNormalMatrix(acc);
+    for(let i=0; i<nAttr.count; i++){
+      v.set(originalNormals[i*3], originalNormals[i*3+1], originalNormals[i*3+2]).applyMatrix3(nm).normalize();
+      nAttr.setXYZ(i, v.x, v.y, v.z);
+    }
+    nAttr.needsUpdate = true;
+  }
+  currentGeometry.computeBoundingBox();
+  currentGeometry.computeBoundingSphere();
+  refreshTransformUI();
+}
+
+function pushTransform(matrix, label){
+  transformOps.push({ matrix: matrix, label: label });
+  transformRedo = [];
+  applyTransformStack();
+  invalidateRigAfterTransform();
+  log('Transform: ' + label + '.');
+}
+
+/* A baked transform moves every vertex, so any skeleton fitted to the old
+   shape is no longer valid — drop back to the pre-rig state rather than
+   leaving a silently mismatched rig in place. */
+function invalidateRigAfterTransform(){
+  if(skinnedMesh || previewRigRoot){
+    disposeRig();
+    if(!currentPreviewMesh && currentGeometry){
+      currentPreviewMesh = new THREE.Mesh(currentGeometry, previewMaterial);
+      scene.add(currentPreviewMesh);
+    }
+    setStep(2);
+    log('Skeleton cleared — re-estimate it after transforming.');
+  }
+}
+
+function currentModelHeight(){
+  if(!currentGeometry) return 1;
+  currentGeometry.computeBoundingBox();
+  const b = currentGeometry.boundingBox;
+  return (b.max.y - b.min.y) || 1;
+}
+
+function doTransform(axis, sign){
+  if(!currentGeometry) return;
+  const amount = XFORM_STEPS[xformMode][xformStep];
+  const m = new THREE.Matrix4();
+  let label;
+  if(xformMode === 'rotate'){
+    const rad = THREE.MathUtils.degToRad(amount * sign);
+    if(axis === 'x') m.makeRotationX(rad);
+    else if(axis === 'y') m.makeRotationY(rad);
+    else m.makeRotationZ(rad);
+    label = 'rotate ' + axis.toUpperCase() + ' ' + (sign>0?'+':'−') + amount + '°';
+  } else if(xformMode === 'move'){
+    const d = amount * sign * currentModelHeight();
+    m.makeTranslation(axis==='x'?d:0, axis==='y'?d:0, axis==='z'?d:0);
+    label = 'move ' + axis.toUpperCase() + ' ' + (sign>0?'+':'−') + Math.abs(d).toFixed(3);
+  } else {
+    // scale is uniform: a non-uniform scale would shear the rig's bind pose
+    const f = sign > 0 ? amount : 1/amount;
+    m.makeScale(f, f, f);
+    label = 'scale ×' + f.toFixed(3);
+  }
+  pushTransform(m, label);
+}
+
+function undoTransform(){
+  if(!transformOps.length) return;
+  transformRedo.push(transformOps.pop());
+  applyTransformStack();
+  invalidateRigAfterTransform();
+  log('Undo.');
+}
+function redoTransform(){
+  if(!transformRedo.length) return;
+  transformOps.push(transformRedo.pop());
+  applyTransformStack();
+  invalidateRigAfterTransform();
+  log('Redo.');
+}
+function resetTransforms(){
+  if(!transformOps.length && !transformRedo.length) return;
+  transformOps = []; transformRedo = [];
+  applyTransformStack();
+  invalidateRigAfterTransform();
+  log('Transforms reset to the mesh as uploaded.');
+}
+function dropToGrid(){
+  if(!currentGeometry) return;
+  currentGeometry.computeBoundingBox();
+  const b = currentGeometry.boundingBox;
+  pushTransform(new THREE.Matrix4().makeTranslation(0, -b.min.y, 0), 'drop to grid');
+}
+function recenterModel(){
+  if(!currentGeometry) return;
+  currentGeometry.computeBoundingBox();
+  const b = currentGeometry.boundingBox;
+  pushTransform(new THREE.Matrix4().makeTranslation(
+    -(b.max.x+b.min.x)/2, 0, -(b.max.z+b.min.z)/2), 'center on grid');
+}
+
+function refreshTransformUI(){
+  const u = document.getElementById('undoBtn'), r = document.getElementById('redoBtn');
+  if(u) u.disabled = transformOps.length === 0;
+  if(r) r.disabled = transformRedo.length === 0;
+  const n = document.getElementById('statXforms');
+  if(n) n.textContent = String(transformOps.length);
+  const sz = document.getElementById('statSize');
+  if(sz && currentGeometry){
+    currentGeometry.computeBoundingBox();
+    const b = currentGeometry.boundingBox;
+    sz.textContent = (b.max.y-b.min.y).toFixed(2) + ' × ' + (b.max.x-b.min.x).toFixed(2) + ' × ' + (b.max.z-b.min.z).toFixed(2);
+  }
+  if(currentGeometry) fitGridToModel();
+}
+
+/* keep the ground grid sized sensibly relative to whatever's loaded */
+function fitGridToModel(){
+  if(!currentGeometry) return;
+  currentGeometry.computeBoundingBox();
+  const b = currentGeometry.boundingBox;
+  const span = Math.max(b.max.x-b.min.x, b.max.z-b.min.z, (b.max.y-b.min.y)*0.6) || 1;
+  const want = Math.max(2, Math.ceil(span*3));
+  if(grid.userData.span === want) return;
+  scene.remove(grid);
+  grid.geometry.dispose();
+  grid = new THREE.GridHelper(want, want*4, 0x2a3138, 0x1a1f24);
+  grid.userData.span = want;
+  grid.visible = document.getElementById('gridToggle').checked;
+  scene.add(grid);
+}
+
 function normalizeGeometry(geometry){
   geometry.computeBoundingBox();
   const bbox = geometry.boundingBox;
@@ -1291,6 +1525,8 @@ function loadMeshFromGeometry(geometry, label){
   document.getElementById('statHeight').textContent = height.toFixed(2);
 
 
+  captureOriginalGeometry(geometry);
+  unlockCard('card-transform');
   unlockCard('card-rig');
   setStep(2);
   log('Loaded <b>' + label + '</b> — ' + verts.toLocaleString() + ' verts, height ' + height.toFixed(2) + ' units.');
@@ -1514,7 +1750,13 @@ function computeBonePositionsHumanoid(geometry, bbox, pose){
     set(name, c ? c.x : cx, bbox.min.y + f*H, c ? c.z : cz);
   }
 
-  /* ---------- legs: trace each leg's own centerline ---------- */
+  /* ---------- legs: trace each leg's own centerline ----------
+     The measured centroid of a leg at crotch height sits out at the middle
+     of the thigh, but the actual hip joint (femoral head) is much closer to
+     the body's midline — using the thigh centre directly is what gives a
+     splay-legged stance, since the whole leg then hangs from too far out.
+     HIP_INSET pulls it back toward the midline. */
+  const HIP_INSET = 0.58;
   const kneeF = ankleF + (hipsF - ankleF) * 0.50;   // knee sits midway hip→ankle
   const toeF  = Math.max(0.004, ankleF * 0.22);
   [['Left',1],['Right',-1]].forEach(function(pair){
@@ -1522,7 +1764,8 @@ function computeBonePositionsHumanoid(geometry, bbox, pose){
     const hip   = legCentroid(crotchF + 0.015, s) || {x: cx + s*halfW*0.16, z: cz};
     const knee  = legCentroid(kneeF, s)           || {x: cx + s*halfW*0.16, z: cz};
     const ankle = legCentroid(ankleF, s)          || {x: cx + s*halfW*0.16, z: cz};
-    set(side+'UpLeg', hip.x,   bbox.min.y + hipsF*H,   hip.z);
+    const hipX  = cx + (hip.x - cx) * HIP_INSET;
+    set(side+'UpLeg', hipX,    bbox.min.y + hipsF*H,   hip.z);
     set(side+'Leg',   knee.x,  bbox.min.y + kneeF*H,   knee.z);
     set(side+'Foot',  ankle.x, bbox.min.y + ankleF*H,  ankle.z);
     // toe tip: front of the foot's own footprint
@@ -1539,13 +1782,20 @@ function computeBonePositionsHumanoid(geometry, bbox, pose){
     set(side+'Toe_End', ankle.x, bbox.min.y + toeF*H, c ? maxZ : ankle.z + halfD*0.3);
   });
 
-  /* ---------- arms: trace the centerline, then split at real fractions ---- */
+  /* ---------- arms: trace the centerline, then split at real fractions ----
+     The detected shoulder landmark is the ARMPIT (where the silhouette
+     widens). The real shoulder joint sits above and inboard of it, inside
+     the torso. Placing the joint at the armpit instead is what makes the
+     armpit skin hang: everything around it rotates about a pivot that's too
+     low and too far out, so the mesh droops there when the arm moves. */
   const shoulderY = bbox.min.y + shoulderF*H;
+  const jointY = bbox.min.y + Math.min(shoulderF + 0.045, neckF - 0.005) * H;
   [['Left',1],['Right',-1]].forEach(function(pair){
     const side = pair[0], s = pair[1];
     const tip = extremeX(s);
     const torsoEdge = cx + s * LM.median * 0.5;
     const clav = sliceCentroid(shoulderF, true) || {x:cx, z:cz};
+    const jointX = cx + s * LM.median * 0.34;   // inboard, inside the ribcage
 
     if(pose === 't' && tip !== null){
       // T-pose: arm runs along X, so walk outward in X and read the
@@ -1556,9 +1806,9 @@ function computeBonePositionsHumanoid(geometry, bbox, pose){
         const c = armSlabCentroidByX(xq, s);
         return { x: xq, y: c ? c.y : shoulderY, z: c ? c.z : cz };
       }
-      const sh = at(0.06), el = at(0.42), wr = at(0.76);
-      set(side+'Shoulder', clav.x + s*LM.median*0.18, shoulderY, clav.z);
-      set(side+'Arm',      sh.x, sh.y, sh.z);
+      const el = at(0.42), wr = at(0.76);
+      set(side+'Shoulder', clav.x + s*LM.median*0.14, jointY, clav.z);
+      set(side+'Arm',      jointX, jointY, clav.z);
       set(side+'ForeArm',  el.x, el.y, el.z);
       set(side+'Hand',     wr.x, wr.y, wr.z);
     } else {
@@ -1570,9 +1820,9 @@ function computeBonePositionsHumanoid(geometry, bbox, pose){
         const c = armClusterByY(yf, s);
         return { x: c ? c.x : cx + s*halfW*(0.3 + 0.6*f), y: bbox.min.y + yf*H, z: c ? c.z : cz };
       }
-      const sh = at(0.05), el = at(0.45), wr = at(0.82);
-      set(side+'Shoulder', clav.x + s*LM.median*0.18, shoulderY, clav.z);
-      set(side+'Arm',      sh.x, sh.y, sh.z);
+      const el = at(0.45), wr = at(0.82);
+      set(side+'Shoulder', clav.x + s*LM.median*0.14, jointY, clav.z);
+      set(side+'Arm',      jointX, jointY, clav.z);
       set(side+'ForeArm',  el.x, el.y, el.z);
       set(side+'Hand',     wr.x, wr.y, wr.z);
     }
@@ -2020,9 +2270,20 @@ function buildWalkClip(){
   // over it, hard plantarflex push at toe-off, then toes lift to clear
   const ANKLE = [[0.00,-6],[0.10,2],[0.30,-2],[0.48,8],[0.60,22],[0.70,2],[0.82,-8],[0.92,-7]];
 
+  // Real feet track close to a single line under the body rather than
+  // staying hip-width apart, so each leg is drawn slightly toward the
+  // midline. +Z rotation swings a leg toward +X, so the left leg needs a
+  // negative value and the right a positive one to both move inward. The
+  // pull eases off while a leg is swinging through the air.
+  const ADDUCT = 5.0;
   ['Left','Right'].forEach(function(s, i){
     const off = i * 0.5;   // right leg is exactly half a cycle out of phase
-    add(makeEulerTrack(s+'UpLeg', times, function(t){ return [cyclicSpline(ph(t)+off, HIP),   0, 0]; }));
+    const sgn = (i === 0) ? -1 : 1;
+    add(makeEulerTrack(s+'UpLeg', times, function(t){
+      const p = ph(t) + off;
+      const swing = cyclicSpline(p, KNEE) / 60;   // ~1 at mid-swing, ~0 planted
+      return [cyclicSpline(p, HIP), 0, sgn * ADDUCT * (1 - 0.45*swing)];
+    }));
     add(makeEulerTrack(s+'Leg',   times, function(t){ return [cyclicSpline(ph(t)+off, KNEE),  0, 0]; }));
     add(makeEulerTrack(s+'Foot',  times, function(t){ return [cyclicSpline(ph(t)+off, ANKLE), 0, 0]; }));
   });
@@ -2779,7 +3040,7 @@ function exportGLTF(includeAnimations){
   const buffers = [{ byteLength: packer.byteLength, uri: 'data:application/octet-stream;base64,' + packer.toBase64() }];
 
   const gltf = {
-    asset: { version:'2.0', generator:'Mesh-to-Motion Auto-Rig Studio' },
+    asset: { version:'2.0', generator:'Mesh Rigger' },
     scene: 0,
     scenes: [{ nodes:[meshNodeIdx, rootBoneNodeIdx] }],
     nodes: nodes, meshes: meshes, skins: skins,
@@ -2873,6 +3134,45 @@ document.querySelectorAll('#bodyTypeChips .chip').forEach(function(btn){
 });
 
 document.getElementById('rigBtn').addEventListener('click', function(){ estimateRig(); });
+
+/* ---- transform editor ---- */
+document.querySelectorAll('#xformModeChips .chip').forEach(function(btn){
+  btn.addEventListener('click', function(){
+    xformMode = btn.dataset.xf;
+    document.querySelectorAll('#xformModeChips .chip').forEach(function(b){ b.classList.toggle('on', b === btn); });
+    // scale is kept uniform (a non-uniform scale would shear the bind pose),
+    // so the per-axis rows are dimmed to show only one pair is live
+    const isScale = xformMode === 'scale';
+    document.querySelectorAll('#xformGrid .nudge-axis').forEach(function(el, i){
+      el.style.opacity = (isScale && i > 0) ? '0.25' : '1';
+    });
+  });
+});
+document.querySelectorAll('#xformStepChips .chip').forEach(function(btn){
+  btn.addEventListener('click', function(){
+    xformStep = btn.dataset.step;
+    document.querySelectorAll('#xformStepChips .chip').forEach(function(b){ b.classList.toggle('on', b === btn); });
+  });
+});
+document.querySelectorAll('#xformGrid .nudge').forEach(function(btn){
+  btn.addEventListener('click', function(){
+    doTransform(btn.dataset.xaxis, parseInt(btn.dataset.sign, 10));
+  });
+});
+document.getElementById('undoBtn').addEventListener('click', undoTransform);
+document.getElementById('redoBtn').addEventListener('click', redoTransform);
+document.getElementById('xformResetBtn').addEventListener('click', resetTransforms);
+document.getElementById('groundBtn').addEventListener('click', dropToGrid);
+document.getElementById('recenterBtn').addEventListener('click', recenterModel);
+document.getElementById('gridToggle').addEventListener('change', function(e){
+  grid.visible = e.target.checked;
+});
+window.addEventListener('keydown', function(e){
+  if(!(e.ctrlKey || e.metaKey)) return;
+  const k = e.key.toLowerCase();
+  if(k === 'z' && !e.shiftKey){ e.preventDefault(); undoTransform(); }
+  else if(k === 'y' || (k === 'z' && e.shiftKey)){ e.preventDefault(); redoTransform(); }
+});
 document.getElementById('reeditBtn').addEventListener('click', function(){ reopenForEditing(); });
 
 document.querySelectorAll('#poseChips .chip').forEach(function(btn){
