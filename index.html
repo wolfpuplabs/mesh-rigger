@@ -1731,6 +1731,65 @@ function computeBonePositionsHumanoid(geometry, bbox, pose){
     }
     return c>0 ? {x:sx/c, z:sz/c} : null;
   }
+  /* Vertical thickness of a thin X-slab within the shoulder band. Walking
+     this outward finds the armpit: the torso is tall in Y there while the
+     arm is thin, so the thickness collapses right at the boundary between
+     them. This is what actually locates the shoulder, instead of guessing
+     from the overall body width. */
+  function slabYExtent(xC, s, band){
+    let mn = Infinity, mx = -Infinity, c = 0;
+    for(let i=0; i<posAttr.count; i++){
+      const x = posAttr.getX(i);
+      if(Math.abs(x - xC) > band) continue;
+      if((s>0 && x <= cx) || (s<0 && x >= cx)) continue;
+      const y = posAttr.getY(i);
+      const yf = (y - bbox.min.y)/H;
+      if(yf < shoulderF - 0.16 || yf > shoulderF + 0.05) continue;
+      if(y < mn) mn = y;
+      if(y > mx) mx = y;
+      c++;
+    }
+    return c > 0 ? mx - mn : 0;
+  }
+  function findTorsoEdge(s){
+    const band = halfW * 0.03;
+    const centerExt = slabYExtent(cx + s*halfW*0.06, s, band);
+    if(!centerExt) return null;
+    for(let f = 0.10; f < 1.0; f += 0.015){
+      const xq = cx + s*halfW*f;
+      const e = slabYExtent(xq, s, band);
+      if(e > 0 && e < centerExt * 0.55) return xq;
+    }
+    return null;
+  }
+  /* mean height of whatever fills an X-slab in the shoulder band — sampled
+     just outside the armpit this is the arm's own centreline height, which
+     is exactly the height the shoulder joint belongs at */
+  function slabCentroidY(xC, s, band){
+    let sy = 0, c = 0;
+    for(let i=0; i<posAttr.count; i++){
+      const x = posAttr.getX(i);
+      if(Math.abs(x - xC) > band) continue;
+      if((s>0 && x <= cx) || (s<0 && x >= cx)) continue;
+      const y = posAttr.getY(i);
+      const yf = (y - bbox.min.y)/H;
+      if(yf < shoulderF - 0.16 || yf > shoulderF + 0.05) continue;
+      sy += y; c++;
+    }
+    return c > 0 ? sy/c : null;
+  }
+  /* outermost point at a given height — the shoulder silhouette in A-pose */
+  function sideExtentAtSlice(yFrac, s){
+    const yC = bbox.min.y + yFrac*H, band = Math.max(0.02*H, 0.015);
+    let best = null;
+    for(let i=0; i<posAttr.count; i++){
+      if(Math.abs(posAttr.getY(i)-yC) > band) continue;
+      const x = posAttr.getX(i);
+      if(s>0 && x>cx && (best===null || x>best)) best = x;
+      if(s<0 && x<cx && (best===null || x<best)) best = x;
+    }
+    return best;
+  }
   function extremeX(side){
     let best = null;
     for(let i=0; i<posAttr.count; i++){
@@ -1746,13 +1805,16 @@ function computeBonePositionsHumanoid(geometry, bbox, pose){
   const pos = {};
   function set(name, x, y, z){ pos[name] = new THREE.Vector3(x, y, z); }
 
-  /* ---------- torso chain, spaced between the measured crotch and neck ---- */
-  const hipsF   = crotchF + (shoulderF - crotchF) * 0.06;
+  /* ---------- torso chain ----------
+     The hip joint (femoral head) sits about 4.5% of body height ABOVE the
+     crotch, not level with it — anchoring the pelvis at the detected crotch
+     is what drops the whole rig down between the legs. */
+  const hipsF   = Math.min(crotchF + 0.045, crotchF + (shoulderF - crotchF) * 0.30);
   const chainF  = {
     Hips:   hipsF,
-    Spine:  crotchF + (shoulderF - crotchF) * 0.28,
-    Spine1: crotchF + (shoulderF - crotchF) * 0.56,
-    Spine2: crotchF + (shoulderF - crotchF) * 0.86,
+    Spine:  hipsF + (shoulderF - hipsF) * 0.26,
+    Spine1: hipsF + (shoulderF - hipsF) * 0.55,
+    Spine2: hipsF + (shoulderF - hipsF) * 0.84,
     Neck:   neckF,
     Head:   neckF + (1 - neckF) * 0.35,
     HeadTop_End: 0.995,
@@ -1768,8 +1830,14 @@ function computeBonePositionsHumanoid(geometry, bbox, pose){
      of the thigh, but the actual hip joint (femoral head) is much closer to
      the body's midline — using the thigh centre directly is what gives a
      splay-legged stance, since the whole leg then hangs from too far out.
-     HIP_INSET pulls it back toward the midline. */
-  const HIP_INSET = 0.58;
+     A flat percentage doesn't generalise (it over-narrows already-narrow
+     rigs and under-narrows wide ones), so the measured centre is nudged in
+     and then clamped to the anatomical range: hip joints sit roughly 6–11%
+     of body height either side of the midline on almost any humanoid. */
+  function hipOffset(centroidX){
+    const d = Math.abs(centroidX - cx) * 0.82;
+    return Math.max(0.055*H, Math.min(0.110*H, d));
+  }
   const kneeF = ankleF + (hipsF - ankleF) * 0.50;   // knee sits midway hip→ankle
   const toeF  = Math.max(0.004, ankleF * 0.22);
   [['Left',1],['Right',-1]].forEach(function(pair){
@@ -1777,7 +1845,7 @@ function computeBonePositionsHumanoid(geometry, bbox, pose){
     const hip   = legCentroid(crotchF + 0.015, s) || {x: cx + s*halfW*0.16, z: cz};
     const knee  = legCentroid(kneeF, s)           || {x: cx + s*halfW*0.16, z: cz};
     const ankle = legCentroid(ankleF, s)          || {x: cx + s*halfW*0.16, z: cz};
-    const hipX  = cx + (hip.x - cx) * HIP_INSET;
+    const hipX  = cx + s * hipOffset(hip.x);
     set(side+'UpLeg', hipX,    bbox.min.y + hipsF*H,   hip.z);
     set(side+'Leg',   knee.x,  bbox.min.y + kneeF*H,   knee.z);
     set(side+'Foot',  ankle.x, bbox.min.y + ankleF*H,  ankle.z);
@@ -1795,32 +1863,42 @@ function computeBonePositionsHumanoid(geometry, bbox, pose){
     set(side+'Toe_End', ankle.x, bbox.min.y + toeF*H, c ? maxZ : ankle.z + halfD*0.3);
   });
 
-  /* ---------- arms: trace the centerline, then split at real fractions ----
-     The detected shoulder landmark is the ARMPIT (where the silhouette
-     widens). The real shoulder joint sits above and inboard of it, inside
-     the torso. Placing the joint at the armpit instead is what makes the
-     armpit skin hang: everything around it rotates about a pivot that's too
-     low and too far out, so the mesh droops there when the arm moves. */
-  const shoulderY = bbox.min.y + shoulderF*H;
-  const jointY = bbox.min.y + Math.min(shoulderF + 0.045, neckF - 0.005) * H;
+  /* ---------- arms ----------
+     Note what the "shoulder" landmark actually is: scanning DOWN from the
+     neck for the first slice wider than the torso finds the TOP of the arm
+     silhouette, not the joint. Placing the joint above that put it up at
+     the neck; deriving its X from the overall body width put it inside the
+     chest. Both are measured properly here instead: the armpit comes from
+     where the slab thickness collapses, and the joint's height comes from
+     the arm's own centreline. */
   [['Left',1],['Right',-1]].forEach(function(pair){
     const side = pair[0], s = pair[1];
     const tip = extremeX(s);
-    const torsoEdge = cx + s * LM.median * 0.5;
     const clav = sliceCentroid(shoulderF, true) || {x:cx, z:cz};
-    const jointX = cx + s * LM.median * 0.34;   // inboard, inside the ribcage
+
+    // armpit / torso edge, with fallbacks if the collapse test finds nothing
+    let torsoEdge = findTorsoEdge(s);
+    if(torsoEdge === null){
+      const outer = sideExtentAtSlice(shoulderF - 0.02, s);
+      torsoEdge = (outer !== null) ? cx + (outer - cx) * 0.80 : cx + s * LM.median * 0.5;
+    }
+    const jointX = cx + (torsoEdge - cx) * 0.78;   // just inboard of the armpit
+    const probe = slabCentroidY(cx + (torsoEdge - cx) * 1.30, s, halfW * 0.05);
+    const jointY = (pose === 't' && probe !== null)
+      ? probe
+      : bbox.min.y + (shoulderF - 0.03) * H;
+    const clavY = Math.min(jointY + 0.02*H, bbox.min.y + (neckF - 0.01)*H);
 
     if(pose === 't' && tip !== null){
-      // T-pose: arm runs along X, so walk outward in X and read the
-      // cross-section's centre height/depth at each step.
+      // T-pose: arm runs along X, so walk outward and read each cross-section
       const reach = tip - torsoEdge;
       function at(f){
         const xq = torsoEdge + reach * f;
         const c = armSlabCentroidByX(xq, s);
-        return { x: xq, y: c ? c.y : shoulderY, z: c ? c.z : cz };
+        return { x: xq, y: c ? c.y : jointY, z: c ? c.z : cz };
       }
       const el = at(0.42), wr = at(0.76);
-      set(side+'Shoulder', clav.x + s*LM.median*0.14, jointY, clav.z);
+      set(side+'Shoulder', cx + (torsoEdge - cx)*0.30, clavY, clav.z);
       set(side+'Arm',      jointX, jointY, clav.z);
       set(side+'ForeArm',  el.x, el.y, el.z);
       set(side+'Hand',     wr.x, wr.y, wr.z);
@@ -1834,7 +1912,7 @@ function computeBonePositionsHumanoid(geometry, bbox, pose){
         return { x: c ? c.x : cx + s*halfW*(0.3 + 0.6*f), y: bbox.min.y + yf*H, z: c ? c.z : cz };
       }
       const el = at(0.45), wr = at(0.82);
-      set(side+'Shoulder', clav.x + s*LM.median*0.14, jointY, clav.z);
+      set(side+'Shoulder', cx + (torsoEdge - cx)*0.30, clavY, clav.z);
       set(side+'Arm',      jointX, jointY, clav.z);
       set(side+'ForeArm',  el.x, el.y, el.z);
       set(side+'Hand',     wr.x, wr.y, wr.z);
