@@ -337,9 +337,13 @@
 
       <section class="card locked" id="card-export">
         <h2><span class="num">05</span> Export</h2>
-        <p class="hint">Both are self-contained <b>.gltf</b> files (mesh + skeleton). Opens in Blender, Unity, most glTF viewers.</p>
-        <button class="primary" id="downloadRiggedBtn" style="width:100%;">⬇ Rigged model only (.gltf)</button>
-        <button class="ghost" id="downloadAnimBtn" style="width:100%;margin-top:8px;">⬇ Rigged + all 4 animations (.gltf)</button>
+        <p class="hint">Self-contained (mesh + skeleton, no external files). <b>.glb</b> is the single-file binary format most game engines and DCC tools expect; <b>.gltf</b> is the same data as readable JSON.</p>
+        <div class="row" id="exportFormatChips">
+          <button class="chip small on" data-fmt="glb">.glb (binary)</button>
+          <button class="chip small" data-fmt="gltf">.gltf (text)</button>
+        </div>
+        <button class="primary" id="downloadRiggedBtn" style="width:100%;margin-top:10px;">⬇ Rigged model only</button>
+        <button class="ghost" id="downloadAnimBtn" style="width:100%;margin-top:8px;">⬇ Rigged + all animations</button>
       </section>
 
       <section class="card">
@@ -3109,17 +3113,21 @@ BufferPacker.prototype.add = function(typedArray){
   this.byteLength += typedArray.byteLength;
   return { byteOffset: byteOffset, byteLength: typedArray.byteLength };
 };
-BufferPacker.prototype.toBase64 = function(){
+BufferPacker.prototype.toUint8Array = function(){
   const full = new Uint8Array(this.byteLength);
   let o = 0;
   for(const c of this.chunks){ full.set(c, o); o += c.byteLength; }
+  return full;
+};
+BufferPacker.prototype.toBase64 = function(){
+  const full = this.toUint8Array();
   let binary = '';
   const chunkSize = 0x8000;
   for(let i=0; i<full.length; i+=chunkSize){ binary += String.fromCharCode.apply(null, full.subarray(i, i+chunkSize)); }
   return btoa(binary);
 };
 
-function exportGLTF(includeAnimations){
+function buildGLTFDocument(includeAnimations){
   const packer = new BufferPacker();
   const bufferViews = [];
   const accessors = [];
@@ -3209,7 +3217,7 @@ function exportGLTF(includeAnimations){
     }
   }
 
-  const buffers = [{ byteLength: packer.byteLength, uri: 'data:application/octet-stream;base64,' + packer.toBase64() }];
+  const buffers = [{ byteLength: packer.byteLength }];
 
   const gltf = {
     asset: { version:'2.0', generator:'Mesh Rigger' },
@@ -3219,21 +3227,79 @@ function exportGLTF(includeAnimations){
     buffers: buffers, bufferViews: bufferViews, accessors: accessors,
   };
   if(animations.length) gltf.animations = animations;
+  return { gltf: gltf, packer: packer };
+}
+
+/* .gltf: JSON text with the binary buffer embedded as a base64 data URI —
+   larger and slower to parse than binary GLB (base64 inflates size ~33%),
+   but human-inspectable and doesn't need a binary-chunk parser. */
+function exportGLTF(includeAnimations){
+  const { gltf, packer } = buildGLTFDocument(includeAnimations);
+  gltf.buffers[0].uri = 'data:application/octet-stream;base64,' + packer.toBase64();
   return JSON.stringify(gltf);
 }
 
-function downloadGLTF(includeAnimations){
+/* .glb: the same document, packed into the standard binary container —
+   12-byte header, then a JSON chunk and a BIN chunk, each individually
+   padded to a 4-byte boundary as the spec requires (JSON padded with
+   spaces, binary padded with zero bytes). This is the format most
+   game engines and DCC tools expect for a single-file animated model. */
+function exportGLB(includeAnimations){
+  const { gltf, packer } = buildGLTFDocument(includeAnimations);
+  const jsonText = JSON.stringify(gltf);
+  let jsonBytes = new TextEncoder().encode(jsonText);
+  const jsonPad = (4 - (jsonBytes.length % 4)) % 4;
+  if(jsonPad > 0){
+    const padded = new Uint8Array(jsonBytes.length + jsonPad);
+    padded.set(jsonBytes);
+    padded.fill(0x20, jsonBytes.length); // glTF spec: pad JSON chunk with spaces
+    jsonBytes = padded;
+  }
+  let binBytes = packer.toUint8Array();
+  const binPad = (4 - (binBytes.length % 4)) % 4;
+  if(binPad > 0){
+    const padded = new Uint8Array(binBytes.length + binPad); // zero-filled by default
+    padded.set(binBytes);
+    binBytes = padded;
+  }
+  const totalLength = 12 + (8 + jsonBytes.length) + (8 + binBytes.length);
+  const buf = new ArrayBuffer(totalLength);
+  const dv = new DataView(buf);
+  let o = 0;
+  dv.setUint32(o, 0x46546C67, true); o += 4;  // magic 'glTF'
+  dv.setUint32(o, 2, true); o += 4;           // version
+  dv.setUint32(o, totalLength, true); o += 4;
+  dv.setUint32(o, jsonBytes.length, true); o += 4;
+  dv.setUint32(o, 0x4E4F534A, true); o += 4;  // 'JSON'
+  new Uint8Array(buf, o, jsonBytes.length).set(jsonBytes); o += jsonBytes.length;
+  dv.setUint32(o, binBytes.length, true); o += 4;
+  dv.setUint32(o, 0x004E4942, true); o += 4;  // 'BIN\0'
+  new Uint8Array(buf, o, binBytes.length).set(binBytes); o += binBytes.length;
+  return buf;
+}
+
+let exportFormat = 'glb';
+function downloadModel(includeAnimations){
   if(!skinnedMesh){ return; }
-  log('Building .gltf (' + (includeAnimations ? ('mesh + skeleton + ' + allClips.length + ' animation clips') : 'mesh + skeleton only') + ')…');
+  const what = includeAnimations ? ('mesh + skeleton + ' + allClips.length + ' animation clips') : 'mesh + skeleton only';
+  log('Building .' + exportFormat + ' (' + what + ')…');
   try{
-    const json = exportGLTF(includeAnimations);
-    const blob = new Blob([json], { type:'model/gltf+json' });
+    let blob, filename;
+    if(exportFormat === 'glb'){
+      const buf = exportGLB(includeAnimations);
+      blob = new Blob([buf], { type:'model/gltf-binary' });
+      filename = includeAnimations ? 'rigged-character-animated.glb' : 'rigged-character.glb';
+    } else {
+      const json = exportGLTF(includeAnimations);
+      blob = new Blob([json], { type:'model/gltf+json' });
+      filename = includeAnimations ? 'rigged-character-animated.gltf' : 'rigged-character.gltf';
+    }
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url; a.download = includeAnimations ? 'rigged-character-animated.gltf' : 'rigged-character.gltf';
+    a.href = url; a.download = filename;
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     setTimeout(function(){ URL.revokeObjectURL(url); }, 2000);
-    log('Downloaded <b>' + a.download + '</b> (' + (json.length/1024).toFixed(0) + ' KB).');
+    log('Downloaded <b>' + filename + '</b> (' + (blob.size/1024).toFixed(0) + ' KB).');
   } catch(err){
     console.error(err);
     log('⚠️ Export failed: ' + err.message);
@@ -3413,8 +3479,14 @@ document.getElementById('speed').addEventListener('input', function(e){
   document.getElementById('speedVal').textContent = v.toFixed(2) + '×';
 });
 
-document.getElementById('downloadRiggedBtn').addEventListener('click', function(){ downloadGLTF(false); });
-document.getElementById('downloadAnimBtn').addEventListener('click', function(){ downloadGLTF(true); });
+document.querySelectorAll('#exportFormatChips .chip').forEach(function(btn){
+  btn.addEventListener('click', function(){
+    exportFormat = btn.dataset.fmt;
+    document.querySelectorAll('#exportFormatChips .chip').forEach(function(b){ b.classList.toggle('on', b === btn); });
+  });
+});
+document.getElementById('downloadRiggedBtn').addEventListener('click', function(){ downloadModel(false); });
+document.getElementById('downloadAnimBtn').addEventListener('click', function(){ downloadModel(true); });
 
 /* drag & drop onto viewport */
 const dropOverlay = document.getElementById('dropzone-overlay');
