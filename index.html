@@ -548,6 +548,10 @@ function segmentsFromDefs(defs){
 const canvas = document.getElementById('gl');
 const renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias:true, alpha:false });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+/* Textures carried over from an uploaded model are sRGB-encoded. Without a
+   matching output encoding they'd be decoded to linear and then written out
+   linearly, which reads as a washed-out, too-dark image. */
+renderer.outputEncoding = THREE.sRGBEncoding;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0b0d10);
@@ -574,6 +578,41 @@ const previewMaterial = new THREE.MeshStandardMaterial({
 const riggedMaterial = new THREE.MeshStandardMaterial({
   color: 0x4de5c0, roughness:0.55, metalness:0.05, flatShading:true, skinning:true
 });
+/* Textured variants. flatShading is deliberately off here: it's a stylisation
+   that suits the untextured grey/teal preview, but it would visibly facet a
+   model that came with its own baked texture. */
+const previewTexMaterial = new THREE.MeshStandardMaterial({
+  color: 0xffffff, roughness:0.85, metalness:0.0
+});
+const riggedTexMaterial = new THREE.MeshStandardMaterial({
+  color: 0xffffff, roughness:0.85, metalness:0.0, skinning:true
+});
+let sourceTexture = null;      // { bytes, mimeType } kept for re-export
+let sourceTextureMap = null;   // THREE.Texture for the viewport
+let sourceTextureURL = null;
+
+function setSourceTexture(tex){
+  if(sourceTextureURL){ URL.revokeObjectURL(sourceTextureURL); sourceTextureURL = null; }
+  if(sourceTextureMap){ sourceTextureMap.dispose(); sourceTextureMap = null; }
+  sourceTexture = tex || null;
+  previewTexMaterial.map = null; riggedTexMaterial.map = null;
+  if(!tex) return;
+  const blob = new Blob([tex.bytes], { type: tex.mimeType });
+  sourceTextureURL = URL.createObjectURL(blob);
+  sourceTextureMap = new THREE.TextureLoader().load(sourceTextureURL, function(){
+    previewTexMaterial.needsUpdate = true;
+    riggedTexMaterial.needsUpdate = true;
+  });
+  sourceTextureMap.flipY = false;          // glTF UV convention
+  sourceTextureMap.encoding = THREE.sRGBEncoding;
+  previewTexMaterial.map = sourceTextureMap;
+  riggedTexMaterial.map = sourceTextureMap;
+  previewTexMaterial.needsUpdate = true;
+  riggedTexMaterial.needsUpdate = true;
+}
+function hasTexture(){ return !!(sourceTexture && currentGeometry && currentGeometry.attributes.uv); }
+function getPreviewMaterial(){ return hasTexture() ? previewTexMaterial : previewMaterial; }
+function getRiggedMaterial(){ return hasTexture() ? riggedTexMaterial : riggedMaterial; }
 
 let currentPreviewMesh = null;   // plain THREE.Mesh before rigging
 let currentGeometry = null;      // normalized BufferGeometry (source of truth)
@@ -873,10 +912,47 @@ function nodeLocalMatrix(node){
   return mat;
 }
 
+/* Pull the base-colour image bytes for a primitive's material, if it has
+   one. Handles both GLB-style bufferView images and data-URI images. */
+function extractGLTFTexture(gltf, buffers, materialIdx){
+  if(materialIdx === undefined || !gltf.materials || !gltf.materials[materialIdx]) return null;
+  const mat = gltf.materials[materialIdx];
+  const pbr = mat.pbrMetallicRoughness;
+  const texRef = pbr && pbr.baseColorTexture;
+  if(!texRef || !gltf.textures || !gltf.textures[texRef.index]) return null;
+  const tex = gltf.textures[texRef.index];
+  if(tex.source === undefined || !gltf.images || !gltf.images[tex.source]) return null;
+  const img = gltf.images[tex.source];
+  try{
+    if(img.bufferView !== undefined && gltf.bufferViews[img.bufferView]){
+      const bv = gltf.bufferViews[img.bufferView];
+      const buf = buffers[bv.buffer];
+      if(!buf) return null;
+      const bytes = new Uint8Array(buf, bv.byteOffset || 0, bv.byteLength);
+      return { bytes: bytes.slice(), mimeType: img.mimeType || 'image/png' };
+    }
+    if(img.uri && img.uri.indexOf('data:') === 0){
+      const comma = img.uri.indexOf(',');
+      const meta = img.uri.substring(5, comma);
+      const mime = meta.split(';')[0] || 'image/png';
+      const bin = atob(img.uri.substring(comma+1));
+      const bytes = new Uint8Array(bin.length);
+      for(let i=0;i<bin.length;i++) bytes[i] = bin.charCodeAt(i);
+      return { bytes: bytes, mimeType: mime };
+    }
+  } catch(e){ /* fall through — texture is optional, geometry still loads */ }
+  return null; // external image file: can't be read without the sidecar
+}
+
 function extractMeshFromGLTF(gltf, buffers){
   const positionsOut = [];
   const normalsOut = [];
+  const uvsOut = [];
   let anyNormals = false;
+  let anyUVs = false;
+  let texture = null;
+  let materialCount = 0;
+  const seenMaterials = new Set();
   const p = new THREE.Vector3(), n = new THREE.Vector3();
 
   function walk(nodeIdx, parentMatrix, depth){
@@ -889,9 +965,16 @@ function extractMeshFromGLTF(gltf, buffers){
       for(const prim of gltf.meshes[node.mesh].primitives){
         if(prim.mode !== undefined && prim.mode !== 4) continue; // triangles only
         if(prim.attributes.POSITION === undefined) continue;
+        if(prim.material !== undefined && !seenMaterials.has(prim.material)){
+          seenMaterials.add(prim.material);
+          materialCount++;
+          if(!texture) texture = extractGLTFTexture(gltf, buffers, prim.material);
+        }
         const positions = readGLTFAccessor(gltf, buffers, prim.attributes.POSITION);
         const vertCount = gltf.accessors[prim.attributes.POSITION].count;
         const normals = prim.attributes.NORMAL !== undefined ? readGLTFAccessor(gltf, buffers, prim.attributes.NORMAL) : null;
+        const uvs = prim.attributes.TEXCOORD_0 !== undefined ? readGLTFAccessor(gltf, buffers, prim.attributes.TEXCOORD_0) : null;
+        if(uvs) anyUVs = true;
         const tPos = new Float32Array(vertCount*3);
         const tNorm = normals ? new Float32Array(vertCount*3) : null;
         for(let i=0; i<vertCount; i++){
@@ -907,6 +990,8 @@ function extractMeshFromGLTF(gltf, buffers){
           positionsOut.push(tPos[vi*3], tPos[vi*3+1], tPos[vi*3+2]);
           if(tNorm) normalsOut.push(tNorm[vi*3], tNorm[vi*3+1], tNorm[vi*3+2]);
           else normalsOut.push(0,0,0);
+          if(uvs) uvsOut.push(uvs[vi*2], uvs[vi*2+1]);
+          else uvsOut.push(0, 0);
         }
         if(prim.indices !== undefined){
           const idxArr = readGLTFAccessor(gltf, buffers, prim.indices);
@@ -933,6 +1018,9 @@ function extractMeshFromGLTF(gltf, buffers){
   } else {
     geometry.computeVertexNormals();
   }
+  if(anyUVs) geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvsOut, 2));
+  geometry.userData.sourceTexture = texture;
+  geometry.userData.materialCount = materialCount;
   return geometry;
 }
 
@@ -1142,7 +1230,7 @@ function invalidateRigAfterTransform(){
   if(skinnedMesh || previewRigRoot){
     disposeRig();
     if(!currentPreviewMesh && currentGeometry){
-      currentPreviewMesh = new THREE.Mesh(currentGeometry, previewMaterial);
+      currentPreviewMesh = new THREE.Mesh(currentGeometry, getPreviewMaterial());
       scene.add(currentPreviewMesh);
     }
     setStep(2);
@@ -1382,7 +1470,7 @@ function reopenForEditing(){
   populateJointSelect(boneList);
   selectJoint('Hips');
 
-  currentPreviewMesh = new THREE.Mesh(currentGeometry, previewMaterial);
+  currentPreviewMesh = new THREE.Mesh(currentGeometry, getPreviewMaterial());
   scene.add(currentPreviewMesh);
 
   document.getElementById('card-anim').classList.add('locked');
@@ -1526,8 +1614,19 @@ function loadMeshFromGeometry(geometry, label){
   }
 
   currentGeometry = geometry;
+  setSourceTexture(geometry.userData.sourceTexture);
+  if(sourceTexture && geometry.attributes.uv){
+    log('Texture kept: ' + sourceTexture.mimeType + ', ' + (sourceTexture.bytes.length/1024).toFixed(0) + ' KB.' +
+        (geometry.userData.materialCount > 1
+          ? ' Note: the model had ' + geometry.userData.materialCount + ' materials — everything is merged into one mesh here, so only the first base-colour texture is carried through.'
+          : ''));
+  } else if(sourceTexture && !geometry.attributes.uv){
+    log('⚠️ Found a texture but the mesh has no UV coordinates, so it can\'t be applied.');
+  } else if(geometry.userData.materialCount > 0){
+    log('No embedded base-colour texture found — the model may use external image files or vertex colours, which aren\'t supported.');
+  }
 
-  currentPreviewMesh = new THREE.Mesh(geometry, previewMaterial);
+  currentPreviewMesh = new THREE.Mesh(geometry, getPreviewMaterial());
   scene.add(currentPreviewMesh);
 
   const height = bbox.max.y - bbox.min.y;
@@ -1983,6 +2082,16 @@ function computeSkinningAsync(geometry, bonePositions, boneNameToIndex, segments
       return { idx: boneNameToIndex[s.bone], a: bonePositions[s.from].clone(), b: bonePositions[s.to].clone() };
     });
     const K = 4;
+    /* Falloff exponent and cutoff. The old 1/d² with no cutoff left every
+       vertex slightly bound to bones that merely happen to pass nearby: a
+       fingertip resting beside the thigh in A-pose picked up ~8% weight
+       from the leg chain, so moving a leg visibly dragged the hand mesh.
+       Raising the exponent localises influence, and rejecting any bone
+       more than RATIO× the nearest bone's distance removes those bindings
+       outright — while still letting genuine joints blend (an elbow vertex
+       stays ~65/35 between forearm and upper arm). */
+    const FALLOFF = 4;
+    const RATIO = 2.5;
     const BATCH = 6000;
     let i = 0;
     const p = new THREE.Vector3(), ab = new THREE.Vector3(), ap = new THREE.Vector3(), closest = new THREE.Vector3();
@@ -2001,9 +2110,13 @@ function computeSkinningAsync(geometry, bonePositions, boneNameToIndex, segments
           dists.push({ idx: seg.idx, d: p.distanceTo(closest) });
         }
         dists.sort(function(a,b){ return a.d - b.d; });
-        const top = dists.slice(0, K);
+        const cutoff = dists[0].d * RATIO;
+        const top = [];
+        for(let k=0; k<dists.length && top.length<K; k++){
+          if(dists[k].d <= cutoff) top.push(dists[k]);
+        }
         let wsum = 0;
-        const ws = top.map(function(t2){ const w = 1/Math.pow(t2.d+0.0001, 2); wsum += w; return w; });
+        const ws = top.map(function(t2){ const w = 1/Math.pow(t2.d+0.0001, FALLOFF); wsum += w; return w; });
         for(let k=0; k<K; k++){
           skinIndices[i*4+k] = k < top.length ? top[k].idx : 0;
           skinWeights[i*4+k] = k < top.length ? ws[k]/wsum : 0;
@@ -2101,7 +2214,7 @@ async function confirmRig(){
     if(skeletonHelper){ scene.remove(skeletonHelper); skeletonHelper = null; }
     if(currentPreviewMesh){ scene.remove(currentPreviewMesh); currentPreviewMesh = null; }
 
-    skinnedMesh = new THREE.SkinnedMesh(currentGeometry, riggedMaterial);
+    skinnedMesh = new THREE.SkinnedMesh(currentGeometry, getRiggedMaterial());
     skinnedMesh.add(rootBone);
     skinnedMesh.updateMatrixWorld(true);
     skeleton = new THREE.Skeleton(boneList);
@@ -3168,9 +3281,25 @@ function buildGLTFDocument(includeAnimations){
   const jointAcc = addAccessor(skinIdxU8, 5121, 'VEC4', vertCount, 34962, false);
   const weightAcc = addAccessor(new Float32Array(geom.attributes.skinWeight.array), 5126, 'VEC4', vertCount, 34962, false);
 
-  const meshes = [{ name:'RiggedCharacter', primitives:[{
-    attributes:{ POSITION:posAcc, NORMAL:normAcc, JOINTS_0:jointAcc, WEIGHTS_0:weightAcc }, mode:4
-  }]}];
+  const primAttributes = { POSITION:posAcc, NORMAL:normAcc, JOINTS_0:jointAcc, WEIGHTS_0:weightAcc };
+  let materials, textures, images, samplers, imageBufferView = null;
+  if(hasTexture()){
+    primAttributes.TEXCOORD_0 = addAccessor(new Float32Array(geom.attributes.uv.array), 5126, 'VEC2', vertCount, 34962, false);
+    // the image goes into the same buffer, so .glb/.gltf stay single-file
+    const packed = packer.add(sourceTexture.bytes);
+    imageBufferView = addBV(packed.byteOffset, packed.byteLength);
+    images = [{ bufferView: imageBufferView, mimeType: sourceTexture.mimeType }];
+    samplers = [{ magFilter:9729, minFilter:9987, wrapS:10497, wrapT:10497 }];
+    textures = [{ sampler:0, source:0 }];
+    materials = [{
+      name:'BaseColor',
+      pbrMetallicRoughness:{ baseColorTexture:{ index:0 }, metallicFactor:0, roughnessFactor:0.85 },
+      doubleSided:true,
+    }];
+  }
+  const primitive = { attributes: primAttributes, mode:4 };
+  if(materials) primitive.material = 0;
+  const meshes = [{ name:'RiggedCharacter', primitives:[primitive] }];
 
   const nodes = [];
   const nameToNode = {};
@@ -3227,6 +3356,12 @@ function buildGLTFDocument(includeAnimations){
     buffers: buffers, bufferViews: bufferViews, accessors: accessors,
   };
   if(animations.length) gltf.animations = animations;
+  if(materials){
+    gltf.materials = materials;
+    gltf.textures = textures;
+    gltf.images = images;
+    gltf.samplers = samplers;
+  }
   return { gltf: gltf, packer: packer };
 }
 
