@@ -555,9 +555,9 @@ renderer.outputEncoding = THREE.sRGBEncoding;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0b0d10);
-scene.fog = new THREE.Fog(0x0b0d10, 5, 16);
+scene.fog = new THREE.Fog(0x0b0d10, 40, 160);
 
-const camera = new THREE.PerspectiveCamera(42, 1, 0.05, 100);
+const camera = new THREE.PerspectiveCamera(42, 1, 0.02, 5000);
 
 const hemi = new THREE.HemisphereLight(0xbfe0ff, 0x14171a, 1.0);
 scene.add(hemi);
@@ -694,7 +694,7 @@ function updateCamera(){
       const d = touchDist(e);
       if(pinchDist != null){
         camRadius *= pinchDist / d;
-        camRadius = Math.max(0.6, Math.min(10, camRadius));
+        camRadius = clampCamRadius(camRadius);
         updateCamera();
       }
       pinchDist = d;
@@ -718,12 +718,18 @@ function updateCamera(){
   canvas.addEventListener('wheel', function(e){
     e.preventDefault();
     camRadius *= (1 + e.deltaY * 0.0012);
-    camRadius = Math.max(0.6, Math.min(10, camRadius));
+    camRadius = clampCamRadius(camRadius);
     updateCamera();
   }, { passive:false });
 })();
 updateCamera();
 
+/* Zoom limits scale with whatever is loaded — a fixed range would leave an
+   oversized model impossible to zoom out far enough to see. */
+function clampCamRadius(r){
+  const h = rigHeightRef || 1;
+  return Math.max(h*0.10, Math.min(h*12, r));
+}
 function fitCameraToHeight(height){
   camTarget.set(0, height * 0.5, 0);
   camRadius = Math.max(1.6, height * 1.9);
@@ -1168,6 +1174,31 @@ function buildSampleBird(){
    edits in a row introduce no accumulated float drift or shear.
    --------------------------------------------------------------------- */
 let originalPositions = null;
+/* Uploaded models arrive in wildly different units — metres, centimetres,
+   or whatever the source app used. A 105,000-unit-tall mesh sits entirely
+   outside the camera's far plane and the scene fog, so it renders as
+   nothing at all. Rather than trying to make the camera cope with any
+   magnitude (which also wrecks depth-buffer precision), the mesh is scaled
+   into a canonical range on import and the factor is recorded so export can
+   put it back exactly as the user supplied it. */
+const CANONICAL_HEIGHT = 1.8;
+let modelImportScale = 1;   // canonical size = original size × this
+function normalizeModelScale(geometry){
+  geometry.computeBoundingBox();
+  const b = geometry.boundingBox;
+  const h = (b.max.y - b.min.y) || 1;
+  modelImportScale = 1;
+  if(h > 0.25 && h < 12) return null;   // already a sane working size
+  const f = CANONICAL_HEIGHT / h;
+  const pos = geometry.attributes.position;
+  for(let i=0; i<pos.count; i++){
+    pos.setXYZ(i, pos.getX(i)*f, pos.getY(i)*f, pos.getZ(i)*f);
+  }
+  pos.needsUpdate = true;
+  geometry.computeBoundingBox();
+  modelImportScale = f;
+  return { from: h, to: CANONICAL_HEIGHT, factor: f };
+}
 let originalNormals = null;
 let transformOps = [];
 let transformRedo = [];
@@ -1613,6 +1644,14 @@ function loadMeshFromGeometry(geometry, label){
     log('Auto-face: ' + status);
   }
 
+  const rescaled = normalizeModelScale(geometry);
+  if(rescaled){
+    bbox = normalizeGeometry(geometry);
+    log('Model was ' + rescaled.from.toFixed(1) + ' units tall — scaled to ' +
+        rescaled.to.toFixed(2) + ' for editing (×' + rescaled.factor.toPrecision(3) +
+        '). Original size is restored on export.');
+  }
+
   currentGeometry = geometry;
   setSourceTexture(geometry.userData.sourceTexture);
   if(sourceTexture && geometry.attributes.uv){
@@ -1630,6 +1669,7 @@ function loadMeshFromGeometry(geometry, label){
   scene.add(currentPreviewMesh);
 
   const height = bbox.max.y - bbox.min.y;
+  rigHeightRef = height || 1;   // also used by zoom limits, snap spacing and grid sizing
   fitCameraToHeight(height);
 
   const verts = geometry.attributes.position.count;
@@ -3276,7 +3316,13 @@ function buildGLTFDocument(includeAnimations){
   const skinIdxU8 = new Uint8Array(skinIdxF.length);
   for(let i=0; i<skinIdxF.length; i++) skinIdxU8[i] = Math.round(skinIdxF[i]);
 
-  const posAcc = addAccessor(new Float32Array(geom.attributes.position.array), 5126, 'VEC3', vertCount, 34962, true);
+  /* Undo the import normalisation so the exported model comes back in the
+     units the user supplied. Normals are direction-only and a uniform scale
+     doesn't change them, so they're written through unmodified. */
+  const invScale = 1 / (modelImportScale || 1);
+  const exportPositions = new Float32Array(geom.attributes.position.array);
+  if(invScale !== 1){ for(let i=0; i<exportPositions.length; i++) exportPositions[i] *= invScale; }
+  const posAcc = addAccessor(exportPositions, 5126, 'VEC3', vertCount, 34962, true);
   const normAcc = addAccessor(new Float32Array(geom.attributes.normal.array), 5126, 'VEC3', vertCount, 34962, false);
   const jointAcc = addAccessor(skinIdxU8, 5121, 'VEC4', vertCount, 34962, false);
   const weightAcc = addAccessor(new Float32Array(geom.attributes.skinWeight.array), 5126, 'VEC4', vertCount, 34962, false);
@@ -3305,7 +3351,7 @@ function buildGLTFDocument(includeAnimations){
   const nameToNode = {};
   function writeBoneNode(bone){
     const idx = nodes.length;
-    nodes.push({ name: bone.name, translation:[bone.position.x, bone.position.y, bone.position.z], children:[] });
+    nodes.push({ name: bone.name, translation:[bone.position.x*invScale, bone.position.y*invScale, bone.position.z*invScale], children:[] });
     nameToNode[bone.name] = idx;
     for(const child of bone.children){
       if(child.isBone){ nodes[idx].children.push(writeBoneNode(child)); }
@@ -3319,9 +3365,19 @@ function buildGLTFDocument(includeAnimations){
   nodes.push({ name:'RiggedCharacter', mesh:0, skin:0 });
 
   const jointNodeIndices = skeleton.bones.map(function(b){ return nameToNode[b.name]; });
+  /* The inverse bind matrix has to describe the skeleton as EXPORTED, so it
+     is rebuilt in the rescaled space instead of reusing the live
+     matrixWorld: the exported bone translations and vertices were both
+     multiplied by invScale, so the bind pose must be too. */
   const ibmArray = new Float32Array(skeleton.bones.length * 16);
   const m = new THREE.Matrix4();
-  skeleton.bones.forEach(function(b, i){ m.copy(b.matrixWorld).invert(); ibmArray.set(m.elements, i*16); });
+  const scaleM = new THREE.Matrix4().makeScale(invScale, invScale, invScale);
+  skeleton.bones.forEach(function(b, i){
+    m.copy(b.matrixWorld);
+    if(invScale !== 1) m.premultiply(scaleM);
+    m.invert();
+    ibmArray.set(m.elements, i*16);
+  });
   const ibmAcc = addAccessor(ibmArray, 5126, 'MAT4', skeleton.bones.length, undefined, false);
   const skins = [{ inverseBindMatrices: ibmAcc, joints: jointNodeIndices, skeleton: rootBoneNodeIdx }];
 
@@ -3338,7 +3394,13 @@ function buildGLTFDocument(includeAnimations){
         if(nodeIdx === undefined) continue;
         const timeAcc = addAccessor(new Float32Array(track.times), 5126, 'SCALAR', track.times.length, undefined, true);
         const type = path === 'rotation' ? 'VEC4' : 'VEC3';
-        const valAcc = addAccessor(new Float32Array(track.values), 5126, type, track.times.length, undefined, false);
+        const trackValues = new Float32Array(track.values);
+        // translation keyframes are positions and must be rescaled like the
+        // rest of the rig; rotation keyframes are quaternions and must not be
+        if(path === 'translation' && invScale !== 1){
+          for(let vi=0; vi<trackValues.length; vi++) trackValues[vi] *= invScale;
+        }
+        const valAcc = addAccessor(trackValues, 5126, type, track.times.length, undefined, false);
         samplers.push({ input: timeAcc, output: valAcc, interpolation:'LINEAR' });
         channels.push({ sampler: samplers.length-1, target:{ node: nodeIdx, path: path } });
       }
