@@ -285,6 +285,12 @@
         <p class="hint">Drag any amber dot in the viewport — it moves on its own, like Mixamo's joint markers, without dragging the rest of the chain with it. Or pick a joint below and nudge it precisely.</p>
         <label class="checkline"><input type="checkbox" id="symmetryToggle" checked> mirror left/right while editing</label>
         <label class="checkline"><input type="checkbox" id="snapToggle"> snap to grid (2% of model height)</label>
+        <div class="row" id="labelChips" style="margin-top:8px;">
+          <span class="nudge-axis" style="align-self:center;">labels</span>
+          <button class="chip small" data-lbl="off">Off</button>
+          <button class="chip small on" data-lbl="selected">Selected</button>
+          <button class="chip small" data-lbl="all">All</button>
+        </div>
         <div class="row" style="margin-top:8px;">
           <select id="jointSelect" style="flex:1 1 auto;background:var(--panel);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:8px;font-family:var(--mono);font-size:12px;"></select>
         </div>
@@ -1507,6 +1513,38 @@ function reopenForEditing(){
 }
 
 /* ---- joint marker handles: create, sync, select, move, nudge --------- */
+/* Joint name labels.
+   Drawn as camera-facing sprites from a small canvas texture rather than
+   DOM overlays, so they stay correctly occluded/positioned as the model is
+   orbited. Dense rigs (30 bones on a bird) get unreadable with every label
+   on at once, hence the "selected only" mode. */
+let jointLabelMode = 'selected';   // 'off' | 'selected' | 'all'
+function makeLabelSprite(text){
+  const pad = 8, font = 26;
+  const c = document.createElement('canvas');
+  const g = c.getContext('2d');
+  g.font = font + 'px ui-monospace, Menlo, monospace';
+  const w = Math.ceil(g.measureText(text).width) + pad*2;
+  c.width = w; c.height = font + pad*2;
+  const g2 = c.getContext('2d');
+  g2.font = font + 'px ui-monospace, Menlo, monospace';
+  g2.fillStyle = 'rgba(10,12,15,0.82)';
+  g2.fillRect(0,0,c.width,c.height);
+  g2.strokeStyle = 'rgba(77,229,192,0.55)';
+  g2.lineWidth = 2;
+  g2.strokeRect(1,1,c.width-2,c.height-2);
+  g2.fillStyle = '#e7e9ec';
+  g2.textBaseline = 'middle';
+  g2.fillText(text, pad, c.height/2);
+  const tex = new THREE.CanvasTexture(c);
+  tex.minFilter = THREE.LinearFilter;
+  const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map:tex, depthTest:false, transparent:true }));
+  spr.renderOrder = 20;
+  const h = rigHeightRef * 0.035;
+  spr.scale.set(h * (c.width/c.height), h, 1);
+  spr.userData.labelWidthRatio = c.width/c.height;
+  return spr;
+}
 function createJointHandles(boneList){
   const group = new THREE.Group();
   const handleRadius = Math.max(0.018, rigHeightRef * 0.028);
@@ -1519,9 +1557,26 @@ function createJointHandles(boneList){
     handle.userData.boneName = bone.name;
     bone.getWorldPosition(wp);
     handle.position.copy(wp);
+    const label = makeLabelSprite(bone.name.replace(/_End$/,''));
+    label.position.set(0, handleRadius*2.1, 0);
+    handle.add(label);
+    handle.userData.label = label;
     group.add(handle);
   });
   return group;
+}
+function updateJointLabels(){
+  if(!jointHandles) return;
+  jointHandles.children.forEach(function(h){
+    const lb = h.userData.label;
+    if(!lb) return;
+    const sel = h.userData.boneName === selectedJointName;
+    lb.visible = jointLabelMode === 'all' || (jointLabelMode === 'selected' && sel);
+    // counteract the handle's own scaling so the text keeps a constant size
+    const s = 1 / (h.scale.x || 1);
+    const base = rigHeightRef * 0.035;
+    lb.scale.set(base * lb.userData.labelWidthRatio * s, base * s, 1);
+  });
 }
 function refreshJointHandles(){
   if(!jointHandles) return;
@@ -1540,6 +1595,7 @@ function selectJoint(boneName){
       h.material.emissive.set(isSel ? 0x3d2600 : 0x0d2a22);
       h.scale.setScalar(isSel ? 1.7 : 1.0);
     });
+    updateJointLabels();
   }
   const sel = document.getElementById('jointSelect');
   if(sel && sel.value !== boneName) sel.value = boneName;
@@ -3206,12 +3262,30 @@ const QUAD_BACK = {
   lower: [[0.00,-10],[0.15,-4],[0.35,-2],[0.60,-8],[0.70,-34],[0.82,-20],[0.92,-12],[0.97,-11]],
   foot:  [[0.00,5],[0.20,1],[0.45,3],[0.62,14],[0.72,-6],[0.85,1],[0.97,4]],
 };
-function quadLimbTracks(times, ph, phases, ampScale){
+/* Gallop uses its own tables rather than a scaled walk. A gallop differs in
+   kind: stance is far shorter, the limbs reach about twice as far, the mid
+   joint folds much deeper in flight, and the spine and body bob do real
+   work. Simply amplifying the walk curves produced a fast-walk look, which
+   is exactly what read as wrong. */
+const GALLOP_FRONT = {
+  upper: [[0.00,-34],[0.10,-20],[0.22,2],[0.35,22],[0.45,26],[0.60,4],[0.78,-24],[0.90,-34]],
+  mid:   [[0.00,16],[0.10,30],[0.24,18],[0.40,34],[0.55,78],[0.68,96],[0.80,60],[0.92,26]],
+  lower: [[0.00,-8],[0.12,-4],[0.30,-2],[0.48,-14],[0.60,-52],[0.74,-38],[0.86,-20],[0.94,-11]],
+  foot:  [[0.00,6],[0.14,0],[0.34,4],[0.50,18],[0.62,-12],[0.80,-2],[0.94,4]],
+};
+const GALLOP_BACK = {
+  upper: [[0.00,-40],[0.10,-24],[0.22,0],[0.34,26],[0.46,34],[0.60,8],[0.78,-28],[0.90,-40]],
+  mid:   [[0.00,24],[0.10,40],[0.24,22],[0.40,42],[0.55,92],[0.68,112],[0.80,70],[0.92,34]],
+  lower: [[0.00,-12],[0.12,-6],[0.30,-4],[0.48,-20],[0.60,-62],[0.74,-44],[0.86,-24],[0.94,-15]],
+  foot:  [[0.00,8],[0.14,2],[0.34,5],[0.50,20],[0.62,-10],[0.80,0],[0.94,6]],
+};
+function quadLimbTracks(times, ph, phases, ampScale, tables){
   const tracks = [];
   const a = ampScale || 1;
   QUAD_LIMBS.forEach(function(L, i){
     const off = phases[i];
-    const T = L.front ? QUAD_FRONT : QUAD_BACK;
+    const T = tables ? (L.front ? tables.front : tables.back)
+                     : (L.front ? QUAD_FRONT : QUAD_BACK);
     [[L.up,T.upper],[L.mid,T.mid],[L.low,T.lower],[L.foot,T.foot]].forEach(function(pair){
       const tr = makeEulerTrack(pair[0], times, function(t){ return [cyclicSpline(ph(t)+off, pair[1])*a, 0, 0]; });
       if(tr) tracks.push(tr);
@@ -3268,22 +3342,25 @@ function buildQuadTrotClip(){
 }
 
 function buildQuadGallopClip(){
-  const duration = 0.58, times = timeRange(duration, 44), tracks = [];
+  const duration = 0.55, times = timeRange(duration, 48), tracks = [];
   const ph = function(t){ return (t/duration) % 1; };
   const TAU = Math.PI*2;
   function add(t){ if(t) tracks.push(t); }
-  // transverse gallop: back pair lands close together, then the front pair,
-  // followed by a suspension phase - hence the uneven offsets
-  quadLimbTracks(times, ph, [0.52, 0.66, 0.00, 0.14], 1.45).forEach(add);
-  // the spine flexes and extends with the stride, which is what separates a
-  // gallop from a fast trot
-  add(makeEulerTrack('Spine',  times, function(t){ const p=ph(t); return [-9*Math.cos(TAU*p),0,0]; }));
-  add(makeEulerTrack('Spine1', times, function(t){ const p=ph(t); return [-7*Math.cos(TAU*(p+0.05)),0,0]; }));
-  add(makeEulerTrack('Hips',   times, function(t){ const p=ph(t); return [8*Math.cos(TAU*p),0,0]; }));
-  add(makePositionTrack('Hips', times, function(t){ const p=ph(t); return [0, 0.045 - 0.055*Math.cos(TAU*(p-0.15)), 0]; }));
-  add(makeEulerTrack('Neck',   times, function(t){ const p=ph(t); return [-10 + 5*Math.cos(TAU*p),0,0]; }));
-  add(makeEulerTrack('Head',   times, function(t){ const p=ph(t); return [4 - 3*Math.cos(TAU*p),0,0]; }));
-  add(makeEulerTrack('Tail',   times, function(t){ const p=ph(t); return [-16 + 6*Math.cos(TAU*p),0,0]; }));
+  // transverse gallop: the two hinds land close together, then the two
+  // fores, with a suspension phase between the pairs
+  quadLimbTracks(times, ph, [0.46, 0.58, 0.00, 0.12], 1, { front:GALLOP_FRONT, back:GALLOP_BACK }).forEach(add);
+  // the spine gathering and extending is what separates a gallop from a
+  // fast trot — the body itself is part of the stride
+  add(makeEulerTrack('Spine',  times, function(t){ const p=ph(t); return [-14*Math.cos(TAU*p),0,0]; }));
+  add(makeEulerTrack('Spine1', times, function(t){ const p=ph(t); return [-11*Math.cos(TAU*(p+0.05)),0,0]; }));
+  add(makeEulerTrack('Hips',   times, function(t){ const p=ph(t); return [12*Math.cos(TAU*p),0,0]; }));
+  add(makePositionTrack('Hips', times, function(t){
+    const p=ph(t);
+    return [0, 0.10 - 0.115*Math.cos(TAU*(p-0.18)), 0];
+  }));
+  add(makeEulerTrack('Neck',   times, function(t){ const p=ph(t); return [-14 + 7*Math.cos(TAU*p),0,0]; }));
+  add(makeEulerTrack('Head',   times, function(t){ const p=ph(t); return [6 - 4*Math.cos(TAU*p),0,0]; }));
+  add(makeEulerTrack('Tail',   times, function(t){ const p=ph(t); return [-20 + 8*Math.cos(TAU*p),0,0]; }));
   return new THREE.AnimationClip('Gallop', duration, tracks);
 }
 
@@ -4167,6 +4244,14 @@ document.getElementById('symmetryToggle').addEventListener('change', function(e)
 document.getElementById('snapToggle').addEventListener('change', function(e){
   snapEnabled = e.target.checked;
   log(snapEnabled ? 'Snap to grid on — joints round to the nearest ' + (rigHeightRef*0.02).toFixed(3) + ' units while dragging or nudging.' : 'Snap to grid off.');
+});
+
+document.querySelectorAll('#labelChips .chip').forEach(function(btn){
+  btn.addEventListener('click', function(){
+    jointLabelMode = btn.dataset.lbl;
+    document.querySelectorAll('#labelChips .chip').forEach(function(b){ b.classList.toggle('on', b === btn); });
+    updateJointLabels();
+  });
 });
 
 document.getElementById('jointSelect').addEventListener('change', function(e){ selectJoint(e.target.value); });
