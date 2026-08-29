@@ -1949,10 +1949,16 @@ function computeBonePositionsHumanoid(geometry, bbox, pose){
   function set(name, x, y, z){ pos[name] = new THREE.Vector3(x, y, z); }
 
   /* ---------- torso chain ----------
-     The hip joint (femoral head) sits about 4.5% of body height ABOVE the
-     crotch, not level with it — anchoring the pelvis at the detected crotch
-     is what drops the whole rig down between the legs. */
-  const hipsF   = Math.min(crotchF + 0.045, crotchF + (shoulderF - crotchF) * 0.30);
+     Two distinct heights here, which the previous version collapsed into
+     one. The femoral head (what LeftUpLeg/RightUpLeg represent) sits around
+     5% of stature above the crotch; the pelvis ROOT that Hips represents
+     sits higher still, near the sacrum, around 8-9% above the crotch. Using
+     the same value for both is what left the root looking sunk down between
+     the legs. Both are clamped so an odd crotch reading can't push the
+     pelvis up into the ribcage. */
+  const span = Math.max(shoulderF - crotchF, 0.10);
+  const hipJointF = crotchF + Math.min(0.048, span * 0.16);   // UpLeg: femoral head
+  const hipsF     = crotchF + Math.min(0.085, span * 0.28);   // Hips: pelvis root
   const chainF  = {
     Hips:   hipsF,
     Spine:  hipsF + (shoulderF - hipsF) * 0.26,
@@ -1981,7 +1987,7 @@ function computeBonePositionsHumanoid(geometry, bbox, pose){
     const d = Math.abs(centroidX - cx) * 0.82;
     return Math.max(0.055*H, Math.min(0.110*H, d));
   }
-  const kneeF = ankleF + (hipsF - ankleF) * 0.50;   // knee sits midway hip→ankle
+  const kneeF = ankleF + (hipJointF - ankleF) * 0.50;   // knee sits midway hip joint→ankle
   const toeF  = Math.max(0.004, ankleF * 0.22);
   [['Left',1],['Right',-1]].forEach(function(pair){
     const side = pair[0], s = pair[1];
@@ -1989,7 +1995,7 @@ function computeBonePositionsHumanoid(geometry, bbox, pose){
     const knee  = legCentroid(kneeF, s)           || {x: cx + s*halfW*0.16, z: cz};
     const ankle = legCentroid(ankleF, s)          || {x: cx + s*halfW*0.16, z: cz};
     const hipX  = cx + s * hipOffset(hip.x);
-    set(side+'UpLeg', hipX,    bbox.min.y + hipsF*H,   hip.z);
+    set(side+'UpLeg', hipX,    bbox.min.y + hipJointF*H, hip.z);
     set(side+'Leg',   knee.x,  bbox.min.y + kneeF*H,   knee.z);
     set(side+'Foot',  ankle.x, bbox.min.y + ankleF*H,  ankle.z);
     // toe tip: front of the foot's own footprint
@@ -2165,12 +2171,110 @@ function computeSkinningAsync(geometry, bonePositions, boneNameToIndex, segments
       if(onProgress) onProgress(end, vertCount);
       if(end < vertCount){ requestAnimationFrame(step); }
       else{
-        geometry.setAttribute('skinIndex', new THREE.Float32BufferAttribute(skinIndices, 4));
-        geometry.setAttribute('skinWeight', new THREE.Float32BufferAttribute(skinWeights, 4));
-        resolve();
+        smoothWeightsAsync(posAttr, vertCount, skinIndices, skinWeights, rigHeightRef, onProgress)
+          .then(function(){
+            geometry.setAttribute('skinIndex', new THREE.Float32BufferAttribute(skinIndices, 4));
+            geometry.setAttribute('skinWeight', new THREE.Float32BufferAttribute(skinWeights, 4));
+            resolve();
+          });
       }
     }
     step();
+  });
+}
+
+/* Neighbourhood weight smoothing.
+   Pure distance weighting flips from one bone to another over almost no
+   distance wherever two body parts touch. The armpit is the worst case:
+   chest vertices and upper-arm vertices sit millimetres apart but bind to
+   completely different bones, so the skin creases and collapses there as
+   soon as the arm moves. Averaging each vertex's weights with those of its
+   spatial neighbours spreads the transition across a real band of surface,
+   which is what gives a soft deforming envelope instead of a hard seam.
+   A uniform grid keeps this roughly O(n); the work is chunked across frames
+   because a dense mesh would otherwise lock the UI for several seconds. */
+function smoothWeightsAsync(posAttr, vertCount, skinIndices, skinWeights, modelHeight, onProgress){
+  const radius = (modelHeight || 1) * 0.022;
+  const ITERS = 2;
+  const MAX_NEIGHBOURS = 48;   // plenty for a smooth average, bounds the cost
+  const BATCH = 4000;
+  const cell = radius;
+  const grid = new Map();
+  const key = function(ix,iy,iz){ return ix + ',' + iy + ',' + iz; };
+  const cellOf = function(v){ return Math.floor(v / cell); };
+
+  for(let i=0; i<vertCount; i++){
+    const k = key(cellOf(posAttr.getX(i)), cellOf(posAttr.getY(i)), cellOf(posAttr.getZ(i)));
+    let bucket = grid.get(k);
+    if(!bucket){ bucket = []; grid.set(k, bucket); }
+    bucket.push(i);
+  }
+
+  const r2 = radius * radius;
+  let curIdx = skinIndices, curW = skinWeights;
+
+  return new Promise(function(resolve){
+    let iter = 0;
+    let outIdx = new Float32Array(vertCount*4);
+    let outW = new Float32Array(vertCount*4);
+    let i = 0;
+
+    function chunk(){
+      const end = Math.min(vertCount, i + BATCH);
+      for(; i<end; i++){
+        const px = posAttr.getX(i), py = posAttr.getY(i), pz = posAttr.getZ(i);
+        const cxi = cellOf(px), cyi = cellOf(py), czi = cellOf(pz);
+        const acc = new Map();
+        let n = 0;
+        outer:
+        for(let dx=-1; dx<=1; dx++) for(let dy=-1; dy<=1; dy++) for(let dz=-1; dz<=1; dz++){
+          const bucket = grid.get(key(cxi+dx, cyi+dy, czi+dz));
+          if(!bucket) continue;
+          for(let b=0; b<bucket.length; b++){
+            const j = bucket[b];
+            const ddx = posAttr.getX(j)-px, ddy = posAttr.getY(j)-py, ddz = posAttr.getZ(j)-pz;
+            if(ddx*ddx + ddy*ddy + ddz*ddz > r2) continue;
+            for(let k=0; k<4; k++){
+              const w = curW[j*4+k];
+              if(w <= 0) continue;
+              const bi = curIdx[j*4+k];
+              acc.set(bi, (acc.get(bi) || 0) + w);
+            }
+            if(++n >= MAX_NEIGHBOURS) break outer;
+          }
+        }
+        if(n === 0){
+          for(let k=0; k<4; k++){ outIdx[i*4+k] = curIdx[i*4+k]; outW[i*4+k] = curW[i*4+k]; }
+          continue;
+        }
+        const entries = Array.from(acc.entries()).sort(function(a,b){ return b[1]-a[1]; }).slice(0,4);
+        let sum = 0;
+        for(const e of entries) sum += e[1];
+        for(let k=0; k<4; k++){
+          if(k < entries.length){
+            outIdx[i*4+k] = entries[k][0];
+            outW[i*4+k] = sum > 0 ? entries[k][1]/sum : 0;
+          } else { outIdx[i*4+k] = 0; outW[i*4+k] = 0; }
+        }
+      }
+
+      if(i < vertCount){ requestAnimationFrame(chunk); return; }
+
+      curIdx = outIdx; curW = outW;
+      iter++;
+      if(onProgress) onProgress(vertCount, vertCount);
+      if(iter < ITERS){
+        outIdx = new Float32Array(vertCount*4);
+        outW = new Float32Array(vertCount*4);
+        i = 0;
+        requestAnimationFrame(chunk);
+        return;
+      }
+      skinIndices.set(curIdx);
+      skinWeights.set(curW);
+      resolve();
+    }
+    chunk();
   });
 }
 
@@ -3365,16 +3469,19 @@ function buildGLTFDocument(includeAnimations){
   nodes.push({ name:'RiggedCharacter', mesh:0, skin:0 });
 
   const jointNodeIndices = skeleton.bones.map(function(b){ return nameToNode[b.name]; });
-  /* The inverse bind matrix has to describe the skeleton as EXPORTED, so it
-     is rebuilt in the rescaled space instead of reusing the live
-     matrixWorld: the exported bone translations and vertices were both
-     multiplied by invScale, so the bind pose must be too. */
+  /* The inverse bind matrix must describe the skeleton exactly as EXPORTED.
+     Scaling every bone's local translation by s (while leaving rotations
+     alone) maps each world matrix W to S·W·S⁻¹ — a similarity transform,
+     because a uniform scale commutes with rotation: S·T(t)·R·S⁻¹ = T(s·t)·R.
+     Using S·W instead leaves the bind pose wrong by a factor of s, which
+     for a heavily rescaled model tears the exported mesh apart. */
   const ibmArray = new Float32Array(skeleton.bones.length * 16);
   const m = new THREE.Matrix4();
   const scaleM = new THREE.Matrix4().makeScale(invScale, invScale, invScale);
+  const unscaleM = new THREE.Matrix4().makeScale(1/invScale, 1/invScale, 1/invScale);
   skeleton.bones.forEach(function(b, i){
     m.copy(b.matrixWorld);
-    if(invScale !== 1) m.premultiply(scaleM);
+    if(invScale !== 1){ m.premultiply(scaleM); m.multiply(unscaleM); }
     m.invert();
     ibmArray.set(m.elements, i*16);
   });
