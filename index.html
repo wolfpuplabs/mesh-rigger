@@ -310,12 +310,6 @@
       <section class="card locked" id="card-anim">
         <h2><span class="num">04</span> Animate</h2>
         <div class="row" id="animChips">
-          <button class="chip small on" data-anim="idle">Idle</button>
-          <button class="chip small" data-anim="walk">Walk</button>
-          <button class="chip small" data-anim="wave">Wave</button>
-          <button class="chip small" data-anim="jump">Jump</button>
-          <button class="chip small" data-anim="peck" style="display:none;">Peck</button>
-          <button class="chip small" data-anim="flap" style="display:none;">Flap</button>
         </div>
         <div class="row" style="margin-top:10px;">
           <button class="small" id="playBtn">⏸ Pause</button>
@@ -2375,12 +2369,6 @@ async function confirmRig(){
     computeRestPose();
     buildAllClips();
     mixer = new THREE.AnimationMixer(skinnedMesh);
-    document.querySelectorAll('#animChips .chip[data-anim]').forEach(function(btn){
-      const a = btn.dataset.anim;
-      if(a === 'idle' || a === 'walk' || a.indexOf('bvh_') === 0){ btn.style.display = ''; return; }
-      const birdOnly = (a === 'peck' || a === 'flap');
-      btn.style.display = (bodyType === 'bird') === birdOnly && bodyType !== 'quadruped' ? '' : 'none';
-    });
     playAnimation('idle');
 
     document.getElementById('card-adjust').classList.add('locked');
@@ -2931,49 +2919,249 @@ function buildJumpClip(){
 
   return new THREE.AnimationClip('Jump', duration, tracks);
 }
+/* ---------------------------------------------------------------------
+   HUMANOID EXTRAS — Run and Sit.
+   Same sign convention as the walk: negative X on a thigh swings it
+   FORWARD, positive knee folds the shin back.
+   --------------------------------------------------------------------- */
+function buildRunClip(){
+  const duration = 0.62, N = 48, times = timeRange(duration, N), tracks = [];
+  function add(t){ if(t) tracks.push(t); }
+  const TAU = Math.PI*2;
+  const ph = function(t){ return (t/duration) % 1; };
+  // A run differs from a walk in kind, not just speed: stance is short
+  // (~35% vs ~60%), both feet leave the ground, the knee folds much harder
+  // through swing, and the torso pitches forward.
+  const HIP   = [[0.00,-38],[0.12,-24],[0.28,0],[0.40,22],[0.50,30],[0.62,10],[0.78,-24],[0.90,-38]];
+  const KNEE  = [[0.00,22],[0.12,42],[0.28,26],[0.45,40],[0.58,92],[0.70,110],[0.82,72],[0.92,34]];
+  const ANKLE = [[0.00,-12],[0.12,6],[0.30,4],[0.45,26],[0.56,10],[0.70,-16],[0.85,-18],[0.95,-14]];
+  ['Left','Right'].forEach(function(s,i){
+    const off = i*0.5;
+    add(makeEulerTrack(s+'UpLeg', times, function(t){ return [cyclicSpline(ph(t)+off,HIP), 0, (i===0?-1:1)*4]; }));
+    add(makeEulerTrack(s+'Leg',   times, function(t){ return [cyclicSpline(ph(t)+off,KNEE), 0, 0]; }));
+    add(makeEulerTrack(s+'Foot',  times, function(t){ return [cyclicSpline(ph(t)+off,ANKLE), 0, 0]; }));
+  });
+  // flight phase: two bounces per stride, and the body never fully settles
+  add(makePositionTrack('Hips', times, function(t){
+    const p=ph(t);
+    return [0.015*Math.sin(TAU*p), 0.030 - 0.038*Math.cos(2*TAU*(p-0.10)), 0];
+  }));
+  add(makeEulerTrack('Hips', times, function(t){ const p=ph(t); return [10, -9*Math.sin(TAU*p), 5*Math.cos(TAU*p)]; }));
+  add(makeEulerTrack('Spine',  times, function(t){ const p=ph(t); return [6, 5*Math.sin(TAU*p), -2*Math.cos(TAU*p)]; }));
+  add(makeEulerTrack('Spine1', times, function(t){ const p=ph(t); return [5, 6*Math.sin(TAU*p), 0]; }));
+  add(makeEulerTrack('Spine2', times, function(t){ const p=ph(t); return [4, 5*Math.sin(TAU*p), 0]; }));
+  add(makeEulerTrack('Neck', times, function(t){ return [-12,0,0]; }));
+  add(makeEulerTrack('Head', times, function(t){ return [-9,0,0]; }));
+  // arms drive hard, elbows locked near 90 degrees as they are at running speed
+  const ARM = 0.62, HP = 38;
+  function armZ(p){ return (ARM/HP) * cyclicSpline(p, HIP); }
+  add(makeDirTrack('LeftArm',  times, function(t){ return [ 0.16, -0.80, armZ(ph(t)+0.5)]; }));
+  add(makeDirTrack('RightArm', times, function(t){ return [-0.16, -0.80, armZ(ph(t))]; }));
+  add(makeEulerTrack('LeftForeArm',  times, function(t){ const p=ph(t); return [78 + 16*Math.cos(TAU*p), 0, 0]; }));
+  add(makeEulerTrack('RightForeArm', times, function(t){ const p=ph(t); return [78 - 16*Math.cos(TAU*p), 0, 0]; }));
+  return new THREE.AnimationClip('Run', duration, tracks);
+}
+
+function buildSitClip(){
+  const duration = 3.2, times = timeRange(duration, 60), tracks = [];
+  function add(t){ if(t) tracks.push(t); }
+  // lower into the seat, settle, hold
+  const hipsY  = [{end:0.25,from:0,to:-0.02},{end:1.30,from:-0.02,to:-0.42},
+                  {end:1.60,from:-0.42,to:-0.38},{end:3.20,from:-0.38,to:-0.38}];
+  const hipRot = [{end:0.25,from:0,to:-6},{end:1.30,from:-6,to:-82},
+                  {end:1.60,from:-82,to:-86},{end:3.20,from:-86,to:-86}];
+  const kneeRot= [{end:0.25,from:4,to:12},{end:1.30,from:12,to:86},
+                  {end:1.60,from:86,to:90},{end:3.20,from:90,to:90}];
+  const ankle  = [{end:0.25,from:0,to:-4},{end:1.30,from:-4,to:-14},
+                  {end:1.60,from:-14,to:-10},{end:3.20,from:-10,to:-10}];
+  add(makePositionTrack('Hips', times, function(t){ return [0, phaseCurve(t,hipsY), -0.04*(phaseCurve(t,hipRot)/-86)]; }));
+  ['Left','Right'].forEach(function(s,i){
+    const sg = i===0?-1:1;
+    add(makeEulerTrack(s+'UpLeg', times, function(t){ return [phaseCurve(t,hipRot), 0, sg*7]; }));
+    add(makeEulerTrack(s+'Leg',   times, function(t){ return [phaseCurve(t,kneeRot), 0, 0]; }));
+    add(makeEulerTrack(s+'Foot',  times, function(t){ return [phaseCurve(t,ankle), 0, 0]; }));
+  });
+  const lean = [{end:0.25,from:0,to:4},{end:1.30,from:4,to:16},{end:1.60,from:16,to:8},{end:3.20,from:8,to:8}];
+  add(makeEulerTrack('Spine',  times, function(t){ return [phaseCurve(t,lean)*0.5,0,0]; }));
+  add(makeEulerTrack('Spine1', times, function(t){ return [phaseCurve(t,lean)*0.3,0,0]; }));
+  add(makeEulerTrack('Neck',   times, function(t){ return [-phaseCurve(t,lean)*0.5,0,0]; }));
+  add(makeEulerTrack('Head',   times, function(t){ return [-phaseCurve(t,lean)*0.4,0,0]; }));
+  // hands come to rest on the thighs
+  const armFwd = [{end:0.25,from:-0.05,to:-0.05},{end:1.30,from:-0.05,to:0.34},{end:3.20,from:0.34,to:0.34}];
+  add(makeDirTrack('LeftArm',  times, function(t){ return [ 0.10,-0.94, phaseCurve(t,armFwd)]; }));
+  add(makeDirTrack('RightArm', times, function(t){ return [-0.10,-0.94, phaseCurve(t,armFwd)]; }));
+  const elb = [{end:0.25,from:10,to:12},{end:1.30,from:12,to:52},{end:3.20,from:52,to:52}];
+  add(makeEulerTrack('LeftForeArm',  times, function(t){ return [phaseCurve(t,elb),0,0]; }));
+  add(makeEulerTrack('RightForeArm', times, function(t){ return [phaseCurve(t,elb),0,0]; }));
+  return new THREE.AnimationClip('Sit', duration, tracks);
+}
 
 /* ---------------------------------------------------------------------
-   QUADRUPED — a basic standing sway and a trot gait (diagonal leg pairs
-   move together: front-left+back-right, then front-right+back-left).
-   No arm-style rest-pose correction needed here since these legs are
-   placed already standing naturally, not held out A/T-pose style.
+   QUADRUPED
+   Limb naming: front legs are Shoulder -> Leg -> Foreleg -> Foot, back legs
+   are Hip -> Leg -> Foreleg -> Foot. As with the humanoid, negative X swings
+   a limb FORWARD and the mid joint only ever folds one way.
+
+   The gaits differ in their footfall pattern, which is what actually makes
+   each read as a distinct speed:
+     WALK   4-beat lateral sequence, feet 0.25 apart, ~65% stance
+     TROT   2-beat, diagonal pairs together
+     GALLOP 4-beat asymmetric, with a suspension phase
+   The previous version used a trot pattern for the walk, which is why it
+   looked stiff and wrong at walking speed.
    --------------------------------------------------------------------- */
+const QUAD_LIMBS = [
+  { up:'FrontLeftShoulder',  mid:'FrontLeftLeg',  low:'FrontLeftForeleg',  foot:'FrontLeftFoot',  front:true  },
+  { up:'FrontRightShoulder', mid:'FrontRightLeg', low:'FrontRightForeleg', foot:'FrontRightFoot', front:true  },
+  { up:'BackLeftHip',        mid:'BackLeftLeg',   low:'BackLeftForeleg',   foot:'BackLeftFoot',   front:false },
+  { up:'BackRightHip',       mid:'BackRightLeg',  low:'BackRightForeleg',  foot:'BackRightFoot',  front:false },
+];
+// Front limb: shoulder swings, elbow and carpus fold to clear the ground.
+const QUAD_FRONT = {
+  upper: [[0.00,-16],[0.20,-6],[0.40,6],[0.60,16],[0.70,8],[0.80,-6],[0.90,-15],[0.97,-17]],
+  mid:   [[0.00,14],[0.15,8],[0.35,7],[0.60,14],[0.70,44],[0.80,50],[0.90,30],[0.97,19]],
+  lower: [[0.00,-6],[0.15,-2],[0.35,0],[0.60,-4],[0.70,-30],[0.82,-18],[0.92,-10],[0.97,-8]],
+  foot:  [[0.00,4],[0.20,0],[0.45,2],[0.62,12],[0.72,-8],[0.85,0],[0.97,3]],
+};
+// Back limb: bigger hip drive, stifle and hock working together.
+const QUAD_BACK = {
+  upper: [[0.00,-14],[0.20,-2],[0.40,10],[0.60,20],[0.70,12],[0.80,-4],[0.90,-13],[0.97,-15]],
+  mid:   [[0.00,20],[0.15,12],[0.35,10],[0.60,18],[0.70,50],[0.80,56],[0.90,36],[0.97,24]],
+  lower: [[0.00,-10],[0.15,-4],[0.35,-2],[0.60,-8],[0.70,-34],[0.82,-20],[0.92,-12],[0.97,-11]],
+  foot:  [[0.00,5],[0.20,1],[0.45,3],[0.62,14],[0.72,-6],[0.85,1],[0.97,4]],
+};
+function quadLimbTracks(times, ph, phases, ampScale){
+  const tracks = [];
+  const a = ampScale || 1;
+  QUAD_LIMBS.forEach(function(L, i){
+    const off = phases[i];
+    const T = L.front ? QUAD_FRONT : QUAD_BACK;
+    [[L.up,T.upper],[L.mid,T.mid],[L.low,T.lower],[L.foot,T.foot]].forEach(function(pair){
+      const tr = makeEulerTrack(pair[0], times, function(t){ return [cyclicSpline(ph(t)+off, pair[1])*a, 0, 0]; });
+      if(tr) tracks.push(tr);
+    });
+  });
+  return tracks;
+}
+
 function buildQuadIdleClip(){
-  const duration = 2.6, times = timeRange(duration, 28), tracks = [];
+  const duration = 3.2, times = timeRange(duration, 40), tracks = [];
   function add(t){ if(t) tracks.push(t); }
-  add(makeEulerTrack('Spine1', times, function(t){ const p=t/duration; return [1.2*Math.sin(2*Math.PI*p),0,0]; }));
-  add(makeEulerTrack('Neck',   times, function(t){ const p=t/duration; return [0,3*Math.sin(2*Math.PI*p+0.7),0]; }));
-  add(makeEulerTrack('Head',   times, function(t){ const p=t/duration; return [0,4*Math.sin(2*Math.PI*p+1.2),0]; }));
+  const TAU = Math.PI*2;
+  const breath = function(t){ return Math.sin(TAU*t/1.9); };
+  const look = function(t){ return Math.sin(TAU*t/duration); };
+  add(makeEulerTrack('Spine1', times, function(t){ return [1.1*breath(t),0,0]; }));
+  add(makeEulerTrack('Spine',  times, function(t){ return [0.7*breath(t),0,0]; }));
+  add(makeEulerTrack('Neck',   times, function(t){ return [-1.2*breath(t), 5*look(t), 0]; }));
+  add(makeEulerTrack('Head',   times, function(t){ return [0, 7*Math.sin(TAU*(t-0.4)/duration), 2*look(t)]; }));
+  add(makeEulerTrack('Tail',   times, function(t){ return [3*breath(t), 9*Math.sin(TAU*t/1.3), 0]; }));
+  add(makePositionTrack('Hips', times, function(t){ return [0, 0.005*breath(t), 0]; }));
   return new THREE.AnimationClip('Idle', duration, tracks);
 }
+
 function buildQuadWalkClip(){
-  const duration = 1.0, N = 32, times = timeRange(duration, N), tracks = [];
+  const duration = 1.25, times = timeRange(duration, 56), tracks = [];
+  const ph = function(t){ return (t/duration) % 1; };
+  const TAU = Math.PI*2;
   function add(t){ if(t) tracks.push(t); }
-  function pulse(p, center){ return Math.pow(Math.max(0, Math.cos(2*Math.PI*(p-center))), 4); }
-
-  const AMP = 20;
-  add(makeEulerTrack('FrontLeftLeg',  times, function(t){ const p=t/duration; return [ AMP*Math.sin(2*Math.PI*p),0,0]; }));
-  add(makeEulerTrack('BackRightLeg',  times, function(t){ const p=t/duration; return [ AMP*Math.sin(2*Math.PI*p),0,0]; }));
-  add(makeEulerTrack('FrontRightLeg', times, function(t){ const p=t/duration; return [-AMP*Math.sin(2*Math.PI*p),0,0]; }));
-  add(makeEulerTrack('BackLeftLeg',   times, function(t){ const p=t/duration; return [-AMP*Math.sin(2*Math.PI*p),0,0]; }));
-
-  add(makeEulerTrack('FrontLeftForeleg',  times, function(t){ const p=t/duration; return [8+26*pulse(p,0),0,0]; }));
-  add(makeEulerTrack('BackRightForeleg',  times, function(t){ const p=t/duration; return [8+26*pulse(p,0),0,0]; }));
-  add(makeEulerTrack('FrontRightForeleg', times, function(t){ const p=t/duration; return [8+26*pulse(p,0.5),0,0]; }));
-  add(makeEulerTrack('BackLeftForeleg',   times, function(t){ const p=t/duration; return [8+26*pulse(p,0.5),0,0]; }));
-
-  add(makeEulerTrack('Spine', times, function(t){ const p=t/duration; return [0,0,2.5*Math.sin(2*Math.PI*p)]; }));
-  add(makeEulerTrack('Neck',  times, function(t){ const p=t/duration; return [1.5*Math.sin(4*Math.PI*p),0,0]; }));
-  add(makePositionTrack('Hips', times, function(t){ const p=t/duration; return [0, 0.008*(1-Math.cos(4*Math.PI*p)), 0]; }));
-
+  // 4-beat lateral sequence: back-left, front-left, back-right, front-right
+  quadLimbTracks(times, ph, [0.25, 0.75, 0.00, 0.50], 1).forEach(add);
+  add(makeEulerTrack('Hips', times, function(t){ const p=ph(t); return [0, -3*Math.sin(TAU*p), 4*Math.sin(TAU*p)]; }));
+  add(makePositionTrack('Hips', times, function(t){ const p=ph(t); return [0, -0.006*Math.cos(4*Math.PI*p), 0]; }));
+  add(makeEulerTrack('Spine',  times, function(t){ const p=ph(t); return [0, 2.5*Math.sin(TAU*p), -2*Math.sin(TAU*p)]; }));
+  add(makeEulerTrack('Spine1', times, function(t){ const p=ph(t); return [0, 2*Math.sin(TAU*(p+0.1)), 0]; }));
+  add(makeEulerTrack('Neck',   times, function(t){ const p=ph(t); return [1.5*Math.sin(4*Math.PI*p), -2*Math.sin(TAU*p), 0]; }));
+  add(makeEulerTrack('Head',   times, function(t){ const p=ph(t); return [-1*Math.sin(4*Math.PI*p), 0, 0]; }));
+  add(makeEulerTrack('Tail',   times, function(t){ const p=ph(t); return [2*Math.sin(4*Math.PI*p), 7*Math.sin(TAU*p), 0]; }));
   return new THREE.AnimationClip('Walk', duration, tracks);
 }
 
+function buildQuadTrotClip(){
+  const duration = 0.72, times = timeRange(duration, 44), tracks = [];
+  const ph = function(t){ return (t/duration) % 1; };
+  const TAU = Math.PI*2;
+  function add(t){ if(t) tracks.push(t); }
+  // 2-beat: diagonal pairs strike together (FL+BR, then FR+BL)
+  quadLimbTracks(times, ph, [0.00, 0.50, 0.50, 0.00], 1.15).forEach(add);
+  add(makePositionTrack('Hips', times, function(t){ const p=ph(t); return [0, 0.010 - 0.014*Math.cos(4*Math.PI*p), 0]; }));
+  add(makeEulerTrack('Hips',   times, function(t){ const p=ph(t); return [0, -2*Math.sin(TAU*p), 2*Math.sin(TAU*p)]; }));
+  add(makeEulerTrack('Spine1', times, function(t){ const p=ph(t); return [2*Math.sin(4*Math.PI*p),0,0]; }));
+  add(makeEulerTrack('Neck',   times, function(t){ return [-4,0,0]; }));
+  add(makeEulerTrack('Tail',   times, function(t){ const p=ph(t); return [-8, 5*Math.sin(TAU*p), 0]; }));
+  return new THREE.AnimationClip('Trot', duration, tracks);
+}
+
+function buildQuadGallopClip(){
+  const duration = 0.58, times = timeRange(duration, 44), tracks = [];
+  const ph = function(t){ return (t/duration) % 1; };
+  const TAU = Math.PI*2;
+  function add(t){ if(t) tracks.push(t); }
+  // transverse gallop: back pair lands close together, then the front pair,
+  // followed by a suspension phase - hence the uneven offsets
+  quadLimbTracks(times, ph, [0.52, 0.66, 0.00, 0.14], 1.45).forEach(add);
+  // the spine flexes and extends with the stride, which is what separates a
+  // gallop from a fast trot
+  add(makeEulerTrack('Spine',  times, function(t){ const p=ph(t); return [-9*Math.cos(TAU*p),0,0]; }));
+  add(makeEulerTrack('Spine1', times, function(t){ const p=ph(t); return [-7*Math.cos(TAU*(p+0.05)),0,0]; }));
+  add(makeEulerTrack('Hips',   times, function(t){ const p=ph(t); return [8*Math.cos(TAU*p),0,0]; }));
+  add(makePositionTrack('Hips', times, function(t){ const p=ph(t); return [0, 0.045 - 0.055*Math.cos(TAU*(p-0.15)), 0]; }));
+  add(makeEulerTrack('Neck',   times, function(t){ const p=ph(t); return [-10 + 5*Math.cos(TAU*p),0,0]; }));
+  add(makeEulerTrack('Head',   times, function(t){ const p=ph(t); return [4 - 3*Math.cos(TAU*p),0,0]; }));
+  add(makeEulerTrack('Tail',   times, function(t){ const p=ph(t); return [-16 + 6*Math.cos(TAU*p),0,0]; }));
+  return new THREE.AnimationClip('Gallop', duration, tracks);
+}
+
+function buildQuadSitClip(){
+  const duration = 3.0, times = timeRange(duration, 52), tracks = [];
+  function add(t){ if(t) tracks.push(t); }
+  // hindquarters fold down, front legs stay propped straight
+  const hipDrop = [{end:0.30,from:0,to:-0.01},{end:1.40,from:-0.01,to:-0.20},
+                   {end:1.70,from:-0.20,to:-0.18},{end:3.00,from:-0.18,to:-0.18}];
+  const backUp  = [{end:0.30,from:0,to:-8},{end:1.40,from:-8,to:-62},
+                   {end:1.70,from:-62,to:-66},{end:3.00,from:-66,to:-66}];
+  const backMid = [{end:0.30,from:14,to:24},{end:1.40,from:24,to:96},
+                   {end:1.70,from:96,to:100},{end:3.00,from:100,to:100}];
+  const backLow = [{end:0.30,from:-8,to:-14},{end:1.40,from:-14,to:-52},
+                   {end:1.70,from:-52,to:-50},{end:3.00,from:-50,to:-50}];
+  add(makePositionTrack('Hips', times, function(t){ return [0, phaseCurve(t,hipDrop), -0.03*(phaseCurve(t,backUp)/-66)]; }));
+  add(makeEulerTrack('Hips', times, function(t){ return [-phaseCurve(t,backUp)*0.30,0,0]; }));
+  ['BackLeft','BackRight'].forEach(function(pre){
+    add(makeEulerTrack(pre+'Hip',    times, function(t){ return [phaseCurve(t,backUp),0,0]; }));
+    add(makeEulerTrack(pre+'Leg',    times, function(t){ return [phaseCurve(t,backMid),0,0]; }));
+    add(makeEulerTrack(pre+'Foreleg',times, function(t){ return [phaseCurve(t,backLow),0,0]; }));
+  });
+  const frontBrace = [{end:0.30,from:0,to:-2},{end:1.40,from:-2,to:-10},{end:3.00,from:-10,to:-10}];
+  ['FrontLeft','FrontRight'].forEach(function(pre){
+    add(makeEulerTrack(pre+'Shoulder', times, function(t){ return [phaseCurve(t,frontBrace),0,0]; }));
+    add(makeEulerTrack(pre+'Leg',      times, function(t){ return [phaseCurve(t,frontBrace)*-0.5,0,0]; }));
+  });
+  const upright = [{end:0.30,from:0,to:2},{end:1.40,from:2,to:14},{end:3.00,from:14,to:14}];
+  add(makeEulerTrack('Spine',  times, function(t){ return [-phaseCurve(t,upright)*0.6,0,0]; }));
+  add(makeEulerTrack('Spine1', times, function(t){ return [-phaseCurve(t,upright)*0.5,0,0]; }));
+  add(makeEulerTrack('Neck',   times, function(t){ return [-phaseCurve(t,upright)*0.4,0,0]; }));
+  add(makeEulerTrack('Tail',   times, function(t){ return [phaseCurve(t,upright)*0.8,0,0]; }));
+  return new THREE.AnimationClip('Sit', duration, tracks);
+}
+
+function buildQuadSniffClip(){
+  const duration = 2.8, times = timeRange(duration, 48), tracks = [];
+  function add(t){ if(t) tracks.push(t); }
+  const TAU = Math.PI*2;
+  // head lowers to the ground and casts side to side
+  const down = [{end:0.60,from:0,to:44},{end:2.20,from:44,to:46},{end:2.80,from:46,to:0}];
+  const env = function(t){ return phaseCurve(t,down)/46; };
+  add(makeEulerTrack('Neck',  times, function(t){ return [phaseCurve(t,down),0,0]; }));
+  add(makeEulerTrack('Head',  times, function(t){ return [phaseCurve(t,down)*0.45, 16*env(t)*Math.sin(TAU*t/0.9), 0]; }));
+  add(makeEulerTrack('Spine1',times, function(t){ return [phaseCurve(t,down)*0.14,0,0]; }));
+  add(makeEulerTrack('Tail',  times, function(t){ return [-6*env(t), 22*env(t)*Math.sin(TAU*t/0.55), 0]; }));
+  add(makePositionTrack('Hips', times, function(t){ return [0, -0.012*env(t), 0]; }));
+  return new THREE.AnimationClip('Sniff', duration, tracks);
+}
+
 /* ---------------------------------------------------------------------
-   BIRD — the two signature behaviours are head stabilisation (a walking
-   bird thrusts its head forward then holds it stock still while the body
-   catches up, rather than bobbing smoothly) and the neck doing most of the
-   work. Both are built explicitly below.
+   BIRD — the signature behaviours are head stabilisation while walking
+   (the head thrusts forward then holds still as the body catches up) and a
+   long neck doing most of the expression.
    --------------------------------------------------------------------- */
 function buildBirdIdleClip(){
   const duration = 3.0, times = timeRange(duration, 48), tracks = [];
@@ -2985,7 +3173,6 @@ function buildBirdIdleClip(){
   add(makeEulerTrack('Neck',   times, function(t){ return [-2.0*breath(t), 5*look(t), 0]; }));
   add(makeEulerTrack('Neck1',  times, function(t){ return [ 1.5*breath(t), 7*Math.sin(TAU*(t-0.2)/duration), 0]; }));
   add(makeEulerTrack('Neck2',  times, function(t){ return [-1.0*breath(t), 6*Math.sin(TAU*(t-0.35)/duration), 0]; }));
-  // small sharp head flicks — birds rarely hold a pose for long
   add(makeEulerTrack('Head', times, function(t){
     const flick = Math.exp(-Math.pow((t % 1.5) - 0.2, 2)/0.006);
     return [-4*flick, 9*Math.sin(TAU*(t-0.5)/duration) + 6*flick, 0];
@@ -2996,76 +3183,52 @@ function buildBirdIdleClip(){
 }
 
 function buildBirdWalkClip(){
-  const duration = 0.9, N = 48, times = timeRange(duration, N), tracks = [];
+  const duration = 0.9, times = timeRange(duration, 48), tracks = [];
   function add(t){ if(t) tracks.push(t); }
   const TAU = Math.PI*2;
   const ph = function(t){ return (t/duration) % 1; };
-  function bump(p,c,w){ let d=Math.abs(p-c); d=Math.min(d,1-d); return Math.exp(-(d*d)/(2*w*w)); }
-
-  // digitigrade stride: the hock (Foot) does the big folding, not the knee
-  function hip(p){ return 16*Math.sin(TAU*p); }
-  function hock(p){ return -25 - 38*bump(p,0.72,0.13); }
-  function toe(p){ return 12 + 26*bump(p,0.78,0.12); }
-  ['Left','Right'].forEach(function(s, i){
-    const off = i * 0.5;
-    add(makeEulerTrack(s+'UpLeg', times, function(t){ return [ hip(ph(t)+off),0,0]; }));
-    add(makeEulerTrack(s+'Leg',   times, function(t){ return [ 20 + 10*bump(ph(t)+off,0.72,0.14),0,0]; }));
-    add(makeEulerTrack(s+'Foot',  times, function(t){ return [ hock(ph(t)+off),0,0]; }));
-    add(makeEulerTrack(s+'Toe',   times, function(t){ return [ toe(ph(t)+off),0,0]; }));
+  // digitigrade stride: the hock (Foot) folds, not the hidden knee
+  const HIP  = [[0.00,-15],[0.20,-6],[0.45,8],[0.60,15],[0.72,6],[0.86,-9],[0.95,-14]];
+  const HOCK = [[0.00,-24],[0.20,-20],[0.45,-22],[0.62,-30],[0.72,-58],[0.82,-44],[0.92,-30]];
+  const TOE  = [[0.00,10],[0.20,6],[0.45,8],[0.62,20],[0.74,34],[0.86,18],[0.95,12]];
+  ['Left','Right'].forEach(function(s,i){
+    const off = i*0.5;
+    add(makeEulerTrack(s+'UpLeg', times, function(t){ return [cyclicSpline(ph(t)+off,HIP),0,0]; }));
+    add(makeEulerTrack(s+'Leg',   times, function(t){ return [18 + 8*Math.max(0,Math.cos(TAU*(ph(t)+off-0.72))),0,0]; }));
+    add(makeEulerTrack(s+'Foot',  times, function(t){ return [cyclicSpline(ph(t)+off,HOCK),0,0]; }));
+    add(makeEulerTrack(s+'Toe',   times, function(t){ return [cyclicSpline(ph(t)+off,TOE),0,0]; }));
   });
-
-  // body rocks side to side over the supporting leg — birds waddle
   add(makeEulerTrack('Hips', times, function(t){ const p=ph(t); return [0, -4*Math.sin(TAU*p), 7*Math.sin(TAU*p)]; }));
   add(makePositionTrack('Hips', times, function(t){
     const p=ph(t);
-    return [0.012*Math.sin(TAU*p), -0.006*Math.cos(2*TAU*p), 0];
+    return [0.012*Math.sin(TAU*p), -0.006*Math.cos(4*Math.PI*p), 0];
   }));
   add(makeEulerTrack('Spine',  times, function(t){ const p=ph(t); return [0, 2*Math.sin(TAU*p), -3*Math.sin(TAU*p)]; }));
   add(makeEulerTrack('Spine1', times, function(t){ const p=ph(t); return [0, 2*Math.sin(TAU*p), -2*Math.sin(TAU*p)]; }));
-
-  // HEAD STABILISATION: thrust forward fast, then hold while the body walks
-  // into it. A sawtooth (not a sine) is what produces that held-still look.
+  // head stabilisation: thrust forward fast, then hold while the body walks
+  // into it - a sawtooth, not a sine, is what produces that held-still look
   function thrust(p){ return p < 0.30 ? smoothstep(p/0.30) : 1 - (p-0.30)/0.70; }
   add(makeEulerTrack('Neck',  times, function(t){ const p=ph(t); return [-14 + 20*thrust(p), 0, 0]; }));
   add(makeEulerTrack('Neck1', times, function(t){ const p=ph(t); return [ 10 - 16*thrust(p), 0, 0]; }));
   add(makeEulerTrack('Neck2', times, function(t){ const p=ph(t); return [  6 - 10*thrust(p), 0, 0]; }));
   add(makeEulerTrack('Head',  times, function(t){ const p=ph(t); return [ -2 + 4*thrust(p), 0, 0]; }));
   add(makeEulerTrack('Tail',  times, function(t){ const p=ph(t); return [3*Math.sin(2*TAU*p), 0, 5*Math.sin(TAU*p)]; }));
-
-  // wings stay folded, just easing with the body's rock
-  ['Left','Right'].forEach(function(s, i){
-    const sg = i === 0 ? 1 : -1;
+  ['Left','Right'].forEach(function(s,i){
+    const sg = i===0?1:-1;
     add(makeEulerTrack(s+'Wing', times, function(t){ const p=ph(t); return [0,0, sg*(3 + 2*Math.sin(TAU*p))]; }));
   });
-
   return new THREE.AnimationClip('Walk', duration, tracks);
 }
 
 function buildBirdPeckClip(){
-  const duration = 1.6, N = 56, times = timeRange(duration, N), tracks = [];
+  const duration = 1.6, times = timeRange(duration, 56), tracks = [];
   function add(t){ if(t) tracks.push(t); }
-  // down fast, brief grab, back up slower, then a pause before looping
-  const neckSegs = [
-    {end:0.10, from:0,  to:-6},
-    {end:0.34, from:-6, to:62},
-    {end:0.50, from:62, to:66},
-    {end:0.82, from:66, to:-4},
-    {end:1.60, from:-4, to:0},
-  ];
-  const neck1Segs = [
-    {end:0.10, from:0,  to:-4},
-    {end:0.34, from:-4, to:40},
-    {end:0.50, from:40, to:44},
-    {end:0.82, from:44, to:-2},
-    {end:1.60, from:-2, to:0},
-  ];
-  const headSegs = [
-    {end:0.10, from:0,   to:4},
-    {end:0.34, from:4,   to:-18},
-    {end:0.50, from:-18, to:-24},
-    {end:0.82, from:-24, to:2},
-    {end:1.60, from:2,   to:0},
-  ];
+  const neckSegs = [{end:0.10,from:0,to:-6},{end:0.34,from:-6,to:62},
+                    {end:0.50,from:62,to:66},{end:0.82,from:66,to:-4},{end:1.60,from:-4,to:0}];
+  const neck1Segs= [{end:0.10,from:0,to:-4},{end:0.34,from:-4,to:40},
+                    {end:0.50,from:40,to:44},{end:0.82,from:44,to:-2},{end:1.60,from:-2,to:0}];
+  const headSegs = [{end:0.10,from:0,to:4},{end:0.34,from:4,to:-18},
+                    {end:0.50,from:-18,to:-24},{end:0.82,from:-24,to:2},{end:1.60,from:2,to:0}];
   add(makeEulerTrack('Neck',  times, function(t){ return [phaseCurve(t,neckSegs),0,0]; }));
   add(makeEulerTrack('Neck1', times, function(t){ return [phaseCurve(t,neck1Segs),0,0]; }));
   add(makeEulerTrack('Neck2', times, function(t){ return [phaseCurve(t,neck1Segs)*0.5,0,0]; }));
@@ -3077,27 +3240,20 @@ function buildBirdPeckClip(){
 }
 
 function buildBirdFlapClip(){
-  const duration = 1.0, N = 48, times = timeRange(duration, N), tracks = [];
+  const duration = 1.0, times = timeRange(duration, 48), tracks = [];
   function add(t){ if(t) tracks.push(t); }
   const TAU = Math.PI*2;
-  // downstroke is faster than the recovery upstroke, and the wing tip lags
-  // behind the shoulder — that trailing delay is what makes a flap read as
-  // a flexible wing rather than a rigid plank hinging up and down.
+  // downstroke faster than the recovery, and the tip lags the shoulder -
+  // that trailing delay is what makes a wing read as flexible, not a plank
   function stroke(t, lag){
     const p = ((t/duration) - lag + 1) % 1;
     return p < 0.4 ? -Math.cos(Math.PI * p/0.4) : Math.cos(Math.PI * (p-0.4)/0.6);
   }
   ['Left','Right'].forEach(function(s, i){
     const sg = i === 0 ? 1 : -1;
-    add(makeEulerTrack(s+'Wing', times, function(t){
-      return [0, 0, sg * (10 + 52*stroke(t,0)) ];
-    }));
-    add(makeEulerTrack(s+'WingForearm', times, function(t){
-      return [0, sg * 10 * stroke(t,0.06), sg * (6 + 26*stroke(t,0.06)) ];
-    }));
-    add(makeEulerTrack(s+'WingHand', times, function(t){
-      return [0, 0, sg * (4 + 20*stroke(t,0.12)) ];
-    }));
+    add(makeEulerTrack(s+'Wing', times, function(t){ return [0, 0, sg * (10 + 52*stroke(t,0)) ]; }));
+    add(makeEulerTrack(s+'WingForearm', times, function(t){ return [0, sg*10*stroke(t,0.06), sg * (6 + 26*stroke(t,0.06)) ]; }));
+    add(makeEulerTrack(s+'WingHand', times, function(t){ return [0, 0, sg * (4 + 20*stroke(t,0.12)) ]; }));
   });
   add(makePositionTrack('Hips', times, function(t){ return [0, 0.022*stroke(t,0.18), 0]; }));
   add(makeEulerTrack('Spine1', times, function(t){ return [-3*stroke(t,0.1),0,0]; }));
@@ -3106,27 +3262,113 @@ function buildBirdFlapClip(){
   return new THREE.AnimationClip('Flap', duration, tracks);
 }
 
+function buildBirdHopClip(){
+  const duration = 0.85, times = timeRange(duration, 44), tracks = [];
+  function add(t){ if(t) tracks.push(t); }
+  // crouch, spring, tuck, land - both feet together, as small birds move
+  const hipsY = [{end:0.12,from:0,to:-0.035},{end:0.34,from:-0.035,to:0.075},
+                 {end:0.52,from:0.075,to:0.045},{end:0.68,from:0.045,to:-0.030},
+                 {end:0.85,from:-0.030,to:0}];
+  const legUp = [{end:0.12,from:-4,to:-26},{end:0.34,from:-26,to:10},
+                 {end:0.52,from:10,to:-14},{end:0.68,from:-14,to:-24},{end:0.85,from:-24,to:-4}];
+  const hock  = [{end:0.12,from:-24,to:-58},{end:0.34,from:-58,to:-14},
+                 {end:0.52,from:-14,to:-46},{end:0.68,from:-46,to:-56},{end:0.85,from:-56,to:-24}];
+  const toe   = [{end:0.12,from:10,to:26},{end:0.34,from:26,to:40},
+                 {end:0.52,from:40,to:16},{end:0.68,from:16,to:24},{end:0.85,from:24,to:10}];
+  add(makePositionTrack('Hips', times, function(t){ return [0, phaseCurve(t,hipsY), 0]; }));
+  ['Left','Right'].forEach(function(s){
+    add(makeEulerTrack(s+'UpLeg', times, function(t){ return [phaseCurve(t,legUp),0,0]; }));
+    add(makeEulerTrack(s+'Foot',  times, function(t){ return [phaseCurve(t,hock),0,0]; }));
+    add(makeEulerTrack(s+'Toe',   times, function(t){ return [phaseCurve(t,toe),0,0]; }));
+  });
+  const lean = [{end:0.12,from:0,to:10},{end:0.34,from:10,to:-6},{end:0.68,from:-6,to:8},{end:0.85,from:8,to:0}];
+  add(makeEulerTrack('Spine1', times, function(t){ return [phaseCurve(t,lean)*0.5,0,0]; }));
+  add(makeEulerTrack('Neck',   times, function(t){ return [-phaseCurve(t,lean)*0.8,0,0]; }));
+  add(makeEulerTrack('Head',   times, function(t){ return [-phaseCurve(t,lean)*0.4,0,0]; }));
+  add(makeEulerTrack('Tail',   times, function(t){ return [phaseCurve(t,lean)*1.2,0,0]; }));
+  // wings give a small assisting flick on the way up
+  ['Left','Right'].forEach(function(s,i){
+    const sg=i===0?1:-1;
+    const w=[{end:0.12,from:4,to:10},{end:0.34,from:10,to:38},{end:0.60,from:38,to:8},{end:0.85,from:8,to:4}];
+    add(makeEulerTrack(s+'Wing', times, function(t){ return [0,0, sg*phaseCurve(t,w)]; }));
+  });
+  return new THREE.AnimationClip('Hop', duration, tracks);
+}
+
+function buildBirdPreenClip(){
+  const duration = 3.4, times = timeRange(duration, 56), tracks = [];
+  function add(t){ if(t) tracks.push(t); }
+  const TAU = Math.PI*2;
+  // head turns and reaches back into the wing, with small nibbling motions
+  const reach = [{end:0.70,from:0,to:1},{end:2.60,from:1,to:1},{end:3.40,from:1,to:0}];
+  const env = function(t){ return phaseCurve(t,reach); };
+  add(makeEulerTrack('Neck',  times, function(t){ return [-28*env(t), -46*env(t), 0]; }));
+  add(makeEulerTrack('Neck1', times, function(t){ return [-20*env(t), -34*env(t), 0]; }));
+  add(makeEulerTrack('Neck2', times, function(t){ return [-12*env(t), -22*env(t), 0]; }));
+  add(makeEulerTrack('Head',  times, function(t){
+    const nibble = env(t) * 7 * Math.sin(TAU*2.6*t);
+    return [-10*env(t) + nibble, -14*env(t), 0];
+  }));
+  add(makeEulerTrack('Spine1', times, function(t){ return [0, -6*env(t), 0]; }));
+  // the wing being groomed lifts slightly away from the body
+  add(makeEulerTrack('LeftWing', times, function(t){ return [0, 0, 18*env(t)]; }));
+  add(makeEulerTrack('LeftWingForearm', times, function(t){ return [0, 0, 10*env(t)]; }));
+  add(makeEulerTrack('Tail', times, function(t){ return [4*env(t), -8*env(t), 0]; }));
+  return new THREE.AnimationClip('Preen', duration, tracks);
+}
+
 function buildAllClips(){
   if(bodyType === 'bird'){
     allClips = [
-      { key:'idle', name:'Idle', clip: buildBirdIdleClip() },
-      { key:'walk', name:'Walk', clip: buildBirdWalkClip() },
-      { key:'peck', name:'Peck', clip: buildBirdPeckClip() },
-      { key:'flap', name:'Flap', clip: buildBirdFlapClip() },
+      { key:'idle',  name:'Idle',  clip: buildBirdIdleClip() },
+      { key:'walk',  name:'Walk',  clip: buildBirdWalkClip() },
+      { key:'hop',   name:'Hop',   clip: buildBirdHopClip() },
+      { key:'peck',  name:'Peck',  clip: buildBirdPeckClip() },
+      { key:'flap',  name:'Flap',  clip: buildBirdFlapClip() },
+      { key:'preen', name:'Preen', clip: buildBirdPreenClip() },
     ];
   } else if(bodyType === 'quadruped'){
     allClips = [
-      { key:'idle', name:'Idle', clip: buildQuadIdleClip() },
-      { key:'walk', name:'Walk', clip: buildQuadWalkClip() },
+      { key:'idle',   name:'Idle',   clip: buildQuadIdleClip() },
+      { key:'walk',   name:'Walk',   clip: buildQuadWalkClip() },
+      { key:'trot',   name:'Trot',   clip: buildQuadTrotClip() },
+      { key:'gallop', name:'Gallop', clip: buildQuadGallopClip() },
+      { key:'sit',    name:'Sit',    clip: buildQuadSitClip() },
+      { key:'sniff',  name:'Sniff',  clip: buildQuadSniffClip() },
     ];
   } else {
     allClips = [
       { key:'idle', name:'Idle', clip: buildIdleClip() },
       { key:'walk', name:'Walk', clip: buildWalkClip() },
+      { key:'run',  name:'Run',  clip: buildRunClip() },
       { key:'wave', name:'Wave', clip: buildWaveClip() },
       { key:'jump', name:'Jump', clip: buildJumpClip() },
+      { key:'sit',  name:'Sit',  clip: buildSitClip() },
     ];
   }
+  rebuildAnimChips();
+}
+
+/* Rebuild the animation buttons from whatever clips the current body type
+   produced. Driving the UI from the data means adding a clip never needs
+   matching markup or a hand-maintained show/hide rule. Imported .bvh chips
+   are preserved and stay at the end of the row. */
+function rebuildAnimChips(){
+  const host = document.getElementById('animChips');
+  if(!host) return;
+  host.querySelectorAll('.chip[data-anim]').forEach(function(b){
+    if(b.dataset.anim.indexOf('bvh_') !== 0) b.remove();
+  });
+  const firstBvh = host.querySelector('.chip[data-anim^="bvh_"]');
+  allClips.forEach(function(c){
+    if(c.key.indexOf('bvh_') === 0) return;
+    const btn = document.createElement('button');
+    btn.className = 'chip small';
+    btn.dataset.anim = c.key;
+    btn.textContent = c.name;
+    btn.addEventListener('click', function(){ playAnimation(c.key); });
+    host.insertBefore(btn, firstBvh);
+  });
 }
 
 function playAnimation(key){
@@ -3766,9 +4008,9 @@ document.getElementById('resetJointsBtn').addEventListener('click', function(){
 
 document.getElementById('confirmRigBtn').addEventListener('click', function(){ confirmRig(); });
 
-document.querySelectorAll('#animChips .chip').forEach(function(btn){
-  btn.addEventListener('click', function(){ playAnimation(btn.dataset.anim); });
-});
+/* Animation chips are created by rebuildAnimChips() from the current clip
+   list and get their click handler at that point, so there is nothing to
+   wire up here at startup. */
 
 document.getElementById('bvhInput').addEventListener('change', function(e){
   const file = e.target.files[0];
