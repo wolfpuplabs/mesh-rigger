@@ -3453,9 +3453,22 @@ function buildGLTFDocument(includeAnimations){
 
   const nodes = [];
   const nameToNode = {};
+  /* The rest pose must be written explicitly. bone.position and
+     bone.matrixWorld reflect whatever animation frame happens to be playing
+     at the moment Export is pressed (Idle autoplays), so reading them here
+     baked a random mid-animation pose into the file as if it were the bind
+     pose. restLocalPositions holds the pose captured right after skinning.
+     Rotations are written as identity to match the bind pose exactly; every
+     animation clip supplies its own absolute arm rotations, so nothing is
+     lost by not baking the arm rest correction into the node defaults. */
+  function restPosOf(bone){
+    const r = restLocalPositions[bone.name];
+    return r || bone.position;
+  }
   function writeBoneNode(bone){
     const idx = nodes.length;
-    nodes.push({ name: bone.name, translation:[bone.position.x*invScale, bone.position.y*invScale, bone.position.z*invScale], children:[] });
+    const t = restPosOf(bone);
+    nodes.push({ name: bone.name, translation:[t.x*invScale, t.y*invScale, t.z*invScale], children:[] });
     nameToNode[bone.name] = idx;
     for(const child of bone.children){
       if(child.isBone){ nodes[idx].children.push(writeBoneNode(child)); }
@@ -3469,20 +3482,21 @@ function buildGLTFDocument(includeAnimations){
   nodes.push({ name:'RiggedCharacter', mesh:0, skin:0 });
 
   const jointNodeIndices = skeleton.bones.map(function(b){ return nameToNode[b.name]; });
-  /* The inverse bind matrix must describe the skeleton exactly as EXPORTED.
-     Scaling every bone's local translation by s (while leaving rotations
-     alone) maps each world matrix W to S·W·S⁻¹ — a similarity transform,
-     because a uniform scale commutes with rotation: S·T(t)·R·S⁻¹ = T(s·t)·R.
-     Using S·W instead leaves the bind pose wrong by a factor of s, which
-     for a heavily rescaled model tears the exported mesh apart. */
+  /* Inverse bind matrices come from skeleton.boneInverses, which Skeleton
+     captured when bind() was called on the true rest pose — recomputing them
+     from the live matrixWorld would again pick up the current animation
+     frame. Scaling every bone's local translation by s maps each world
+     matrix W to S·W·S⁻¹ (a similarity transform, since a uniform scale
+     commutes with rotation: S·T(t)·R·S⁻¹ = T(s·t)·R), so the inverse
+     transforms the same way: S·W⁻¹·S⁻¹. */
   const ibmArray = new Float32Array(skeleton.bones.length * 16);
   const m = new THREE.Matrix4();
   const scaleM = new THREE.Matrix4().makeScale(invScale, invScale, invScale);
   const unscaleM = new THREE.Matrix4().makeScale(1/invScale, 1/invScale, 1/invScale);
   skeleton.bones.forEach(function(b, i){
-    m.copy(b.matrixWorld);
+    if(skeleton.boneInverses && skeleton.boneInverses[i]) m.copy(skeleton.boneInverses[i]);
+    else m.copy(b.matrixWorld).invert();
     if(invScale !== 1){ m.premultiply(scaleM); m.multiply(unscaleM); }
-    m.invert();
     ibmArray.set(m.elements, i*16);
   });
   const ibmAcc = addAccessor(ibmArray, 5126, 'MAT4', skeleton.bones.length, undefined, false);
