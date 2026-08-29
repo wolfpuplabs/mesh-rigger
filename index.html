@@ -2077,6 +2077,181 @@ function computeBonePositionsHumanoid(geometry, bbox, pose){
    skip the per-joint measurement the humanoid rig uses). Left/right pairs
    still mirror automatically since the defs already encode +x for one side
    and -x for the other, same idea as the humanoid rig. */
+/* ---------------------------------------------------------------------
+   Quadruped joint placement, measured from the mesh.
+   Fixed bounding-box fractions can't work here: a tail stretches the Z
+   range, ears and a raised head stretch Y, and body proportions vary
+   enormously between breeds. So the same landmark idea used for the
+   humanoid is applied to a horizontal body plan:
+     • belly line — the lowest height at which the body is one continuous
+       mass along its length (below it, the front and back legs are
+       separate islands)
+     • leg groups — clustering everything below the belly along Z gives two
+       groups, whose centres are the shoulder and hip positions
+     • spine — the centroid of the body above the belly at each Z, so the
+       chain follows the animal's actual back rather than a straight line
+   --------------------------------------------------------------------- */
+function computeBonePositionsQuadruped(geometry, bbox, defs){
+  const posAttr = geometry.attributes.position;
+  const H = (bbox.max.y - bbox.min.y) || 1;
+  const L = (bbox.max.z - bbox.min.z) || 1;
+  const W = (bbox.max.x - bbox.min.x) || 1;
+  const cx = (bbox.max.x + bbox.min.x) / 2;
+  const NZ = 64;
+
+  // --- belly line: lowest slice that forms a single run along Z ---
+  let bellyF = 0.45;
+  {
+    const NY = 100;
+    const occ = new Uint8Array(NZ);
+    for(let i=0; i<NY; i++){
+      const yLo = bbox.min.y + (i/NY)*H, yHi = bbox.min.y + ((i+1)/NY)*H;
+      occ.fill(0);
+      for(let v=0; v<posAttr.count; v++){
+        const y = posAttr.getY(v);
+        if(y < yLo || y >= yHi) continue;
+        let zi = Math.floor((posAttr.getZ(v) - bbox.min.z)/L * NZ);
+        if(zi < 0) zi = 0; if(zi >= NZ) zi = NZ-1;
+        occ[zi] = 1;
+      }
+      let runs = 0, inRun = false;
+      for(let k=0; k<NZ; k++){
+        if(occ[k] && !inRun){ runs++; inRun = true; }
+        else if(!occ[k]) inRun = false;
+      }
+      if(runs === 1 && i > 3){ bellyF = i/NY; break; }
+    }
+  }
+  const bellyY = bbox.min.y + bellyF*H;
+
+  // --- leg groups: cluster everything below the belly along Z ---
+  let hipZF = 0.20, shoulderZF = 0.68;
+  {
+    const hist = new Float64Array(NZ);
+    const cut = bbox.min.y + bellyF*H*0.92;
+    for(let v=0; v<posAttr.count; v++){
+      if(posAttr.getY(v) >= cut) continue;
+      let zi = Math.floor((posAttr.getZ(v) - bbox.min.z)/L * NZ);
+      if(zi < 0) zi = 0; if(zi >= NZ) zi = NZ-1;
+      hist[zi]++;
+    }
+    const runs = []; let s = -1;
+    for(let i=0; i<NZ; i++){
+      if(hist[i] > 0 && s < 0) s = i;
+      else if(hist[i] === 0 && s >= 0){ runs.push([s, i-1]); s = -1; }
+    }
+    if(s >= 0) runs.push([s, NZ-1]);
+    const centres = runs.map(function(r){
+      let sw=0, sz=0;
+      for(let i=r[0]; i<=r[1]; i++){ sw += hist[i]; sz += hist[i]*((i+0.5)/NZ); }
+      return { zf: sz/sw, w: sw };
+    }).sort(function(a,b){ return b.w - a.w; }).slice(0,2).sort(function(a,b){ return a.zf - b.zf; });
+    if(centres.length === 2){ hipZF = centres[0].zf; shoulderZF = centres[1].zf; }
+  }
+
+  // --- spine: centroid of the body above the belly at a given Z ---
+  function spineAt(zf){
+    const zC = bbox.min.z + zf*L, band = L*0.035;
+    let sy=0, sx=0, c=0;
+    for(let v=0; v<posAttr.count; v++){
+      if(posAttr.getY(v) < bellyY) continue;
+      if(Math.abs(posAttr.getZ(v) - zC) > band) continue;
+      sy += posAttr.getY(v); sx += posAttr.getX(v); c++;
+    }
+    return c>0 ? { y:sy/c, x:sx/c } : null;
+  }
+  // --- one leg's centroid at a height, restricted to its own quadrant ---
+  const zSplit = bbox.min.z + ((hipZF + shoulderZF)/2)*L;
+  function legAt(yf, front, side){
+    const yC = bbox.min.y + yf*H, band = Math.max(H*0.045, 0.01);
+    let sx=0, sz=0, c=0;
+    for(let v=0; v<posAttr.count; v++){
+      if(Math.abs(posAttr.getY(v) - yC) > band) continue;
+      const z = posAttr.getZ(v);
+      if(front ? (z < zSplit) : (z >= zSplit)) continue;
+      const x = posAttr.getX(v);
+      if(side > 0 ? (x <= cx) : (x >= cx)) continue;
+      sx += x; sz += z; c++;
+    }
+    return c>0 ? { x:sx/c, z:sz/c } : null;
+  }
+  // --- front of the body (nose) and the neck between it and the shoulder ---
+  let noseZF = 1.0;
+  {
+    for(let f=shoulderZF; f<=1.0; f+=0.01){
+      const zC = bbox.min.z + f*L, band = L*0.02;
+      let any = false;
+      for(let v=0; v<posAttr.count && !any; v++){
+        if(posAttr.getY(v) < bellyY) continue;
+        if(Math.abs(posAttr.getZ(v) - zC) <= band) any = true;
+      }
+      if(any) noseZF = f;
+    }
+  }
+
+  const pos = {};
+  function set(n,x,y,z){ pos[n] = new THREE.Vector3(x,y,z); }
+  function spineSet(name, zf, yBias){
+    const c = spineAt(zf) || { x:cx, y:bellyY + 0.15*H };
+    set(name, c.x, c.y + (yBias||0)*H, bbox.min.z + zf*L);
+  }
+
+  // torso chain runs hip -> shoulder along the measured back
+  spineSet('Hips',   hipZF, 0.01);
+  spineSet('Spine',  hipZF + (shoulderZF-hipZF)*0.36, 0.01);
+  spineSet('Spine1', hipZF + (shoulderZF-hipZF)*0.74, 0.01);
+  const neckZF = shoulderZF + (noseZF - shoulderZF)*0.32;
+  const headZF = shoulderZF + (noseZF - shoulderZF)*0.74;
+  spineSet('Neck', neckZF, 0.03);
+  spineSet('Head', headZF, 0.04);
+  {
+    const h = pos['Head'];
+    set('HeadTop_End', h.x, h.y, bbox.min.z + noseZF*L);
+    const t = spineAt(Math.max(0.02, hipZF*0.45)) || { x:cx, y:pos['Hips'].y };
+    set('Tail', t.x, t.y, bbox.min.z + Math.max(0.02, hipZF*0.5)*L);
+    set('TailTip_End', t.x, t.y, bbox.min.z + 0.01*L);
+  }
+
+  // legs: four chains traced down through their own quadrant
+  const legs = [
+    { front:true,  side:1,  names:['FrontLeftShoulder','FrontLeftLeg','FrontLeftForeleg','FrontLeftFoot','FrontLeftToe_End'] },
+    { front:true,  side:-1, names:['FrontRightShoulder','FrontRightLeg','FrontRightForeleg','FrontRightFoot','FrontRightToe_End'] },
+    { front:false, side:1,  names:['BackLeftHip','BackLeftLeg','BackLeftForeleg','BackLeftFoot','BackLeftToe_End'] },
+    { front:false, side:-1, names:['BackRightHip','BackRightLeg','BackRightForeleg','BackRightFoot','BackRightToe_End'] },
+  ];
+  const heights = [0.94, 0.62, 0.30, 0.06];   // as fractions of the belly height
+  legs.forEach(function(Lg){
+    const anchorZ = bbox.min.z + (Lg.front ? shoulderZF : hipZF)*L;
+    const samples = heights.map(function(hf){
+      return legAt(bellyF*hf, Lg.front, Lg.side) || { x: cx + Lg.side*W*0.16, z: anchorZ };
+    });
+    for(let i=0; i<4; i++){
+      set(Lg.names[i], samples[i].x, bbox.min.y + bellyF*heights[i]*H, samples[i].z);
+    }
+    // toe tip: the furthest-forward point of that foot's own footprint
+    let maxZ = -Infinity, found = false;
+    const footTop = bbox.min.y + bellyF*0.14*H;
+    for(let v=0; v<posAttr.count; v++){
+      if(posAttr.getY(v) > footTop) continue;
+      const z = posAttr.getZ(v);
+      if(Lg.front ? (z < zSplit) : (z >= zSplit)) continue;
+      const x = posAttr.getX(v);
+      if(Lg.side > 0 ? (x <= cx) : (x >= cx)) continue;
+      if(z > maxZ){ maxZ = z; found = true; }
+    }
+    set(Lg.names[4], samples[3].x, bbox.min.y + 0.004*H, found ? maxZ : samples[3].z + L*0.05);
+  });
+
+  // any bone the measurements couldn't produce falls back to its definition
+  for(const def of defs){
+    const p = pos[def.name];
+    if(!p || !isFinite(p.x) || !isFinite(p.y) || !isFinite(p.z)){
+      pos[def.name] = new THREE.Vector3(cx + def.x*(W/2), bbox.min.y + def.y*H, bbox.min.z + def.z*L);
+    }
+  }
+  return pos;
+}
+
 function computeBonePositionsFractional(geometry, bbox, defs){
   const H = (bbox.max.y - bbox.min.y) || 1;
   const L = (bbox.max.z - bbox.min.z) || 1;
@@ -2290,8 +2465,9 @@ function estimateRig(){
     currentGeometry.computeBoundingBox();
     const bbox = currentGeometry.boundingBox;
     rigHeightRef = (bbox.max.y - bbox.min.y) || 1;
-    const bonePositions = (bodyType === 'quadruped' || bodyType === 'bird')
-      ? computeBonePositionsFractional(currentGeometry, bbox, activeBoneDefs)
+    const bonePositions =
+        bodyType === 'quadruped' ? computeBonePositionsQuadruped(currentGeometry, bbox, activeBoneDefs)
+      : bodyType === 'bird'      ? computeBonePositionsFractional(currentGeometry, bbox, activeBoneDefs)
       : computeBonePositionsHumanoid(currentGeometry, bbox, poseMode);
     const built = buildBoneHierarchy(bonePositions, activeBoneDefs);
     bonesByName = built.bonesByName;
@@ -3922,7 +4098,7 @@ document.querySelectorAll('#bodyTypeChips .chip').forEach(function(btn){
     document.getElementById('poseChips').style.display = isHuman ? '' : 'none';
     const hints = {
       humanoid: 'Pick the pose your mesh is actually in — joints are found by locating real landmarks in the mesh (neck constriction, armpit, crotch, ankle) and tracing each limb\'s centerline. Fine-tune every joint by hand next.',
-      quadruped:'Quadruped bones are placed from plain body-box fractions (front/back legs, spine along the body\'s length) — a rougher first pass than the humanoid rig. Fine-tune every joint by hand next.',
+      quadruped:'Quadruped joints are measured from the mesh: the belly line, the front and back leg clusters below it, and the spine traced along the animal\'s own back. Fine-tune every joint by hand next.',
       bird:     'Bird bones are placed from plain body-box fractions: a three-joint neck, folded wings, and digitigrade legs (the visible backward-bending joint is the ankle, not the knee). Fine-tune every joint by hand next.',
     };
     document.getElementById('rigHint').textContent = hints[bodyType] || hints.humanoid;
